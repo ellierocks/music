@@ -10,16 +10,17 @@ mouse support, and high-resolution album art rendering through the Kitty graphic
 - Mouse-clickable transport controls
 - Keyboard transport and seeking controls
 - Track queue, progress bar, and animated visualizer
-- Kitty graphics protocol support for album covers
+- Kitty graphics protocol support for album covers in compatible terminals
 - Terminal-theme-friendly UI with configurable accent colors
 
 ## Requirements
 
 - Rust stable
 - A supported audio output device
-- Kitty terminal if you want full-resolution album art
+- A Kitty-graphics-compatible terminal if you want full-resolution album art
 
-Without Kitty, `music` falls back to a text-mode cover renderer.
+In compatible terminals such as Kitty, WezTerm, and Ghostty, `music` uses graphics protocol
+rendering for sharp album art. Otherwise it falls back to a text-mode cover renderer.
 
 ## Usage
 
@@ -82,10 +83,10 @@ Example:
 MUSIC_ACCENT=#ff875f MUSIC_ACCENT_ALT=#5f87ff cargo run -- ~/Music/Album
 ```
 
-## Notes
+Graphics protocol behavior can also be overridden:
 
-- Kitty image rendering is used only when Kitty is detected.
-- The current package metadata uses placeholder GitHub URLs. Replace them before publishing.
+- `MUSIC_FORCE_GRAPHICS=1` forces protocol image rendering
+- `MUSIC_DISABLE_GRAPHICS=1` disables protocol image rendering
 
 ## License
 

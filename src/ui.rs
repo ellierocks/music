@@ -28,7 +28,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!(" one album at a time  •  {}", app.album.title),
+                " one album at a time ",
                 Style::default().fg(theme.text).bg(theme.surface),
             ),
         ]))

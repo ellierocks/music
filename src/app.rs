@@ -1,13 +1,14 @@
 use std::{
     collections::HashMap,
     env,
+    io::Cursor,
     path::PathBuf,
     time::{Duration, Instant},
 };
 
 use anyhow::Context;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-use image::{DynamicImage, GenericImageView};
+use image::{DynamicImage, GenericImageView, ImageFormat};
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use ratatui::{
     layout::Rect,
@@ -73,6 +74,7 @@ pub struct App {
     pub theme: Theme,
     pub accent_phase: f32,
     cover_art: Option<DynamicImage>,
+    cover_png_data: Option<Vec<u8>>,
     cover_cache: Option<CoverCache>,
     rng: SmallRng,
 }
@@ -93,6 +95,7 @@ impl App {
                     .with_context(|| format!("failed to open cover art {}", path.display()))
             })
             .transpose()?;
+        let cover_png_data = cover_art.as_ref().map(encode_cover_png).transpose()?;
 
         Ok(Self {
             album,
@@ -108,6 +111,7 @@ impl App {
             theme: Theme::from_env(),
             accent_phase: 0.0,
             cover_art,
+            cover_png_data,
             cover_cache: None,
             rng: SmallRng::from_entropy(),
         })
@@ -222,6 +226,10 @@ impl App {
 
     pub fn cover_path(&self) -> Option<&std::path::Path> {
         self.album.cover_path.as_deref()
+    }
+
+    pub fn cover_png_data(&self) -> Option<&[u8]> {
+        self.cover_png_data.as_deref()
     }
 
     pub fn render_cover(&mut self, width: u16, height: u16) -> Vec<Line<'static>> {
@@ -412,6 +420,14 @@ fn fallback_cover(title: &str, width: u16, height: u16, theme: &Theme) -> Vec<Li
     }
 
     lines
+}
+
+fn encode_cover_png(image: &DynamicImage) -> anyhow::Result<Vec<u8>> {
+    let mut buffer = Cursor::new(Vec::new());
+    image
+        .write_to(&mut buffer, ImageFormat::Png)
+        .context("failed to encode cover art as PNG")?;
+    Ok(buffer.into_inner())
 }
 
 fn blank_line(width: usize) -> Line<'static> {

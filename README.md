@@ -3,15 +3,15 @@
 ![music TUI screenshot](assets/example.png)
 
 `music` is a minimal Rust TUI music player built with `ratatui`, `tokio`, and `rodio`.
-It is intentionally focused on one album directory at a time, with a clean transport UI,
-mouse support, and high-resolution album art rendering through the Kitty graphics protocol.
+It is intentionally focused on one album directory at a time, with keyboard-first playback,
+mouse seek support, and high-resolution album art rendering through the Kitty graphics protocol.
 
 ## Features
 
 - Single-album playback from a local directory
-- Mouse-clickable transport controls
+- Mouse-click seek on the progress bar
 - Keyboard transport and seeking controls
-- Track queue, progress bar, and animated visualizer
+- Track queue, integrated progress bar, and animated visualizer
 - Kitty graphics protocol support for album covers in compatible terminals
 - Terminal-theme-friendly UI with configurable accent colors
 
@@ -23,6 +23,8 @@ mouse support, and high-resolution album art rendering through the Kitty graphic
 
 In compatible terminals such as Kitty, WezTerm, and Ghostty, `music` uses graphics protocol
 rendering for sharp album art. Otherwise it falls back to a text-mode cover renderer.
+
+If the window is too small, the cover panel is hidden instead of distorting the artwork.
 
 ## Usage
 
@@ -60,7 +62,6 @@ Recognized cover filenames:
 
 Mouse support:
 
-- Click transport buttons
 - Click the progress bar to seek
 
 ## Theme Configuration
@@ -75,7 +76,6 @@ You can override colors with environment variables:
 - `MUSIC_TEXT`
 - `MUSIC_MUTED`
 - `MUSIC_SURFACE`
-- `MUSIC_ELEVATED`
 
 Values can be named colors like `cyan` or hex colors like `#5fd7ff`.
 

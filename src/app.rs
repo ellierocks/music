@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     env,
     io::Cursor,
     path::PathBuf,
@@ -18,15 +17,6 @@ use ratatui::{
 
 use crate::audio::{Album, AudioEngine, PlaybackSnapshot, load_album};
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum ButtonId {
-    Previous,
-    PlayPause,
-    Stop,
-    Next,
-    Repeat,
-}
-
 #[derive(Clone, Debug)]
 pub enum Action {
     Quit,
@@ -37,7 +27,6 @@ pub enum Action {
     ToggleRepeat,
     SeekBy(Duration),
     SeekBackBy(Duration),
-    Click(ButtonId),
     RefreshLayout,
 }
 
@@ -50,7 +39,6 @@ pub struct Theme {
     pub text: Color,
     pub muted: Color,
     pub surface: Color,
-    pub elevated: Color,
 }
 
 #[derive(Clone)]
@@ -67,7 +55,6 @@ pub struct App {
     pub repeat: bool,
     pub pulse: f32,
     pub started: Instant,
-    pub button_rects: HashMap<ButtonId, Rect>,
     pub progress_rect: Option<Rect>,
     pub cover_rect: Option<Rect>,
     pub visualizer: Vec<u64>,
@@ -104,7 +91,6 @@ impl App {
             repeat: true,
             pulse: 0.0,
             started: Instant::now(),
-            button_rects: HashMap::new(),
             progress_rect: None,
             cover_rect: None,
             visualizer: vec![3; 28],
@@ -131,13 +117,11 @@ impl App {
     pub async fn handle_action(&mut self, action: Action) -> anyhow::Result<()> {
         match action {
             Action::Quit | Action::RefreshLayout => {}
-            Action::TogglePause | Action::Click(ButtonId::PlayPause) => self.engine.toggle_pause(),
-            Action::NextTrack | Action::Click(ButtonId::Next) => self.advance_track(false)?,
-            Action::PreviousTrack | Action::Click(ButtonId::Previous) => {
-                self.rewind_or_previous()?
-            }
-            Action::Stop | Action::Click(ButtonId::Stop) => self.engine.stop(),
-            Action::ToggleRepeat | Action::Click(ButtonId::Repeat) => self.repeat = !self.repeat,
+            Action::TogglePause => self.engine.toggle_pause(),
+            Action::NextTrack => self.advance_track(false)?,
+            Action::PreviousTrack => self.rewind_or_previous()?,
+            Action::Stop => self.engine.stop(),
+            Action::ToggleRepeat => self.repeat = !self.repeat,
             Action::SeekBy(delta) => self.seek_by(delta)?,
             Action::SeekBackBy(delta) => self.seek_back_by(delta)?,
         }
@@ -148,17 +132,8 @@ impl App {
     pub fn action_from_mouse(&self, mouse: MouseEvent) -> Option<Action> {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                let point = Rect::new(mouse.column, mouse.row, 1, 1);
-
-                if let Some(button) = self
-                    .button_rects
-                    .iter()
-                    .find_map(|(id, rect)| rect.intersects(point).then_some(*id))
-                {
-                    return Some(Action::Click(button));
-                }
-
                 if let Some(progress_rect) = self.progress_rect {
+                    let point = Rect::new(mouse.column, mouse.row, 1, 1);
                     if progress_rect.intersects(point) && progress_rect.width > 0 {
                         let relative = mouse.column.saturating_sub(progress_rect.x) as f32
                             / progress_rect.width.max(1) as f32;
@@ -179,16 +154,20 @@ impl App {
         }
     }
 
-    pub fn set_button_rect(&mut self, button: ButtonId, rect: Rect) {
-        self.button_rects.insert(button, rect);
-    }
-
     pub fn set_progress_rect(&mut self, rect: Rect) {
         self.progress_rect = Some(rect);
     }
 
+    pub fn clear_progress_rect(&mut self) {
+        self.progress_rect = None;
+    }
+
     pub fn set_cover_rect(&mut self, rect: Rect) {
         self.cover_rect = Some(rect);
+    }
+
+    pub fn clear_cover_rect(&mut self) {
+        self.cover_rect = None;
     }
 
     pub fn playback(&self) -> PlaybackSnapshot {
@@ -265,6 +244,23 @@ impl App {
         }
     }
 
+    pub fn resize_visualizer(&self, width: u16) -> Vec<u64> {
+        let count = width as usize;
+        let len = self.visualizer.len();
+        if len == 0 {
+            return vec![0; count];
+        }
+        if count == len {
+            return self.visualizer.clone();
+        }
+        let mut result = Vec::with_capacity(count);
+        for i in 0..count {
+            let src = i * len / count;
+            result.push(self.visualizer[src.min(len - 1)]);
+        }
+        result
+    }
+
     fn advance_track(&mut self, automatic: bool) -> anyhow::Result<()> {
         if self.current_track + 1 < self.album.tracks.len() {
             self.current_track += 1;
@@ -325,7 +321,6 @@ impl Theme {
             text: color_from_env("MUSIC_TEXT").unwrap_or(Color::Reset),
             muted: color_from_env("MUSIC_MUTED").unwrap_or(Color::Gray),
             surface: color_from_env("MUSIC_SURFACE").unwrap_or(Color::Reset),
-            elevated: color_from_env("MUSIC_ELEVATED").unwrap_or(Color::DarkGray),
         }
     }
 

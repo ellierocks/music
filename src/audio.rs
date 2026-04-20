@@ -20,6 +20,7 @@ pub struct Track {
 pub struct Album {
     pub title: String,
     pub artist: String,
+    pub path: PathBuf,
     pub cover_path: Option<PathBuf>,
     pub tracks: Vec<Track>,
 }
@@ -94,7 +95,7 @@ impl AudioEngine {
     }
 
     pub fn seek_to(&mut self, target: Duration, track: &Track) -> anyhow::Result<()> {
-        self.play_track(track)?;
+        let was_paused = self.sink.is_paused();
         let file = File::open(&track.path)
             .with_context(|| format!("failed to open track {}", track.path.display()))?;
         let source = Decoder::new(BufReader::new(file))
@@ -103,10 +104,15 @@ impl AudioEngine {
         self.sink.stop();
         self.sink = Sink::try_new(&self.handle).context("failed to recreate sink")?;
         self.sink.append(source);
-        self.sink.play();
         self.started_at = Some(Instant::now() - target);
-        self.paused_at = None;
-        self.paused_position = Duration::ZERO;
+        self.paused_position = if was_paused { target } else { Duration::ZERO };
+        if was_paused {
+            self.sink.pause();
+            self.paused_at = Some(Instant::now());
+        } else {
+            self.sink.play();
+            self.paused_at = None;
+        }
         Ok(())
     }
 
@@ -184,10 +190,18 @@ pub fn load_album(root: &Path) -> anyhow::Result<Album> {
         .and_then(|name| name.to_str())
         .unwrap_or("Album")
         .replace('_', " ");
+    let artist = root
+        .parent()
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Local Files")
+        .replace('_', " ");
 
     Ok(Album {
         title,
-        artist: "Local Files".to_string(),
+        artist,
+        path: root.to_path_buf(),
         cover_path,
         tracks,
     })

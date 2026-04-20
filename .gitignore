@@ -1,4 +1,3 @@
-/target
 target/
 .DS_Store
 *.swp
@@ -7,8 +6,10 @@ target/
 *.bak
 .idea/
 .vscode/
+agents/
 .agents/
 .codex
 .codex/
 .claude/
+.opencode/
 Cargo.toml.orig

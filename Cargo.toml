@@ -1,6 +1,6 @@
 [package]
 name = "music"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "A minimal ratatui music player focused on one album at a time, with mouse controls and Kitty album art."
 readme = "README.md"

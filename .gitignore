@@ -8,6 +8,7 @@ target/
 .idea/
 .vscode/
 .agents/
+.codex
 .codex/
 .claude/
 Cargo.toml.orig

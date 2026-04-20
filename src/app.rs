@@ -1,33 +1,21 @@
-use std::{
-    env,
-    io::Cursor,
-    path::PathBuf,
-    time::{Duration, Instant},
-};
+use std::{env, path::PathBuf, time::{Duration, Instant}};
 
 use anyhow::Context;
-use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-use image::{DynamicImage, GenericImageView, ImageFormat};
+use image::GenericImageView;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
-use ratatui::{
-    layout::Rect,
-    style::{Color, Style},
-    text::{Line, Span},
-};
+use ratatui::style::{Color, Style};
 
 use crate::audio::{Album, AudioEngine, PlaybackSnapshot, load_album};
+use crate::ipc::{self, AlbumSnapshot, AppSnapshot, PlaybackSnapshot as RemotePlaybackSnapshot, TrackSnapshot};
 
 #[derive(Clone, Debug)]
 pub enum Action {
-    Quit,
     TogglePause,
     NextTrack,
     PreviousTrack,
     Stop,
-    ToggleRepeat,
     SeekBy(Duration),
     SeekBackBy(Duration),
-    RefreshLayout,
 }
 
 #[derive(Clone, Debug)]
@@ -41,28 +29,15 @@ pub struct Theme {
     pub surface: Color,
 }
 
-#[derive(Clone)]
-struct CoverCache {
-    width: u16,
-    height: u16,
-    lines: Vec<Line<'static>>,
-}
-
 pub struct App {
     pub album: Album,
     pub engine: AudioEngine,
     pub current_track: usize,
-    pub repeat: bool,
     pub pulse: f32,
     pub started: Instant,
-    pub progress_rect: Option<Rect>,
-    pub cover_rect: Option<Rect>,
     pub visualizer: Vec<u64>,
-    pub theme: Theme,
     pub accent_phase: f32,
-    cover_art: Option<DynamicImage>,
-    cover_png_data: Option<Vec<u8>>,
-    cover_cache: Option<CoverCache>,
+    cover_dimensions: Option<(u32, u32)>,
     rng: SmallRng,
 }
 
@@ -74,31 +49,25 @@ impl App {
             .play_track(&album.tracks[0])
             .context("failed to start first track")?;
 
-        let cover_art = album
+        let cover_dimensions = album
             .cover_path
             .as_ref()
             .map(|path| {
                 image::open(path)
                     .with_context(|| format!("failed to open cover art {}", path.display()))
+                    .map(|image| image.dimensions())
             })
             .transpose()?;
-        let cover_png_data = cover_art.as_ref().map(encode_cover_png).transpose()?;
 
         Ok(Self {
             album,
             engine,
             current_track: 0,
-            repeat: true,
             pulse: 0.0,
             started: Instant::now(),
-            progress_rect: None,
-            cover_rect: None,
-            visualizer: vec![3; 28],
-            theme: Theme::from_env(),
+            visualizer: vec![3; 96],
             accent_phase: 0.0,
-            cover_art,
-            cover_png_data,
-            cover_cache: None,
+            cover_dimensions,
             rng: SmallRng::from_entropy(),
         })
     }
@@ -116,12 +85,10 @@ impl App {
 
     pub async fn handle_action(&mut self, action: Action) -> anyhow::Result<()> {
         match action {
-            Action::Quit | Action::RefreshLayout => {}
             Action::TogglePause => self.engine.toggle_pause(),
             Action::NextTrack => self.advance_track(false)?,
             Action::PreviousTrack => self.rewind_or_previous()?,
             Action::Stop => self.engine.stop(),
-            Action::ToggleRepeat => self.repeat = !self.repeat,
             Action::SeekBy(delta) => self.seek_by(delta)?,
             Action::SeekBackBy(delta) => self.seek_back_by(delta)?,
         }
@@ -129,45 +96,9 @@ impl App {
         Ok(())
     }
 
-    pub fn action_from_mouse(&self, mouse: MouseEvent) -> Option<Action> {
-        match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(progress_rect) = self.progress_rect {
-                    let point = Rect::new(mouse.column, mouse.row, 1, 1);
-                    if progress_rect.intersects(point) && progress_rect.width > 0 {
-                        let relative = mouse.column.saturating_sub(progress_rect.x) as f32
-                            / progress_rect.width.max(1) as f32;
-                        let target = self
-                            .current_track()
-                            .duration
-                            .mul_f32(relative.clamp(0.0, 1.0));
-                        return Some(if target > self.playback().position {
-                            Action::SeekBy(target - self.playback().position)
-                        } else {
-                            Action::SeekBackBy(self.playback().position - target)
-                        });
-                    }
-                }
-                None
-            }
-            _ => None,
-        }
-    }
-
-    pub fn set_progress_rect(&mut self, rect: Rect) {
-        self.progress_rect = Some(rect);
-    }
-
-    pub fn clear_progress_rect(&mut self) {
-        self.progress_rect = None;
-    }
-
-    pub fn set_cover_rect(&mut self, rect: Rect) {
-        self.cover_rect = Some(rect);
-    }
-
-    pub fn clear_cover_rect(&mut self) {
-        self.cover_rect = None;
+    pub async fn open_album(&mut self, album_dir: PathBuf) -> anyhow::Result<()> {
+        *self = Self::new(album_dir).await?;
+        Ok(())
     }
 
     pub fn playback(&self) -> PlaybackSnapshot {
@@ -178,96 +109,104 @@ impl App {
         &self.album.tracks[self.current_track]
     }
 
-    pub fn total_duration(&self) -> Duration {
-        self.current_track().duration
-    }
-
-    pub fn progress_ratio(&self) -> f64 {
-        let total = self.total_duration().as_secs_f64();
-        if total == 0.0 {
-            0.0
-        } else {
-            (self.playback().position.as_secs_f64() / total).clamp(0.0, 1.0)
-        }
-    }
-
-    pub fn accent_glow(&self) -> Color {
-        blend(
-            self.theme.accent,
-            self.theme.accent_alt,
-            (self.accent_phase + 1.0) * 0.5,
-        )
-    }
-
     pub fn cover_dimensions(&self) -> Option<(u32, u32)> {
-        self.cover_art.as_ref().map(DynamicImage::dimensions)
+        self.cover_dimensions
     }
 
-    pub fn cover_path(&self) -> Option<&std::path::Path> {
-        self.album.cover_path.as_deref()
-    }
-
-    pub fn cover_png_data(&self) -> Option<&[u8]> {
-        self.cover_png_data.as_deref()
-    }
-
-    pub fn render_cover(&mut self, width: u16, height: u16) -> Vec<Line<'static>> {
-        if width == 0 || height == 0 {
-            return Vec::new();
+    pub fn snapshot(&self) -> AppSnapshot {
+        let playback = self.playback();
+        AppSnapshot {
+            album: AlbumSnapshot {
+                title: self.album.title.clone(),
+                artist: self.album.artist.clone(),
+                path: self.album.path.display().to_string(),
+                cover_path: self.album.cover_path.as_ref().map(|path| path.display().to_string()),
+                tracks: self
+                    .album
+                    .tracks
+                    .iter()
+                    .map(|track| TrackSnapshot {
+                        title: track.title.clone(),
+                        duration_millis: ipc::duration_to_millis(track.duration),
+                    })
+                    .collect(),
+            },
+            current_track: self.current_track,
+            pulse: self.pulse,
+            accent_phase: self.accent_phase,
+            playback: RemotePlaybackSnapshot {
+                playing: playback.playing,
+                paused: playback.paused,
+                position_millis: ipc::duration_to_millis(playback.position),
+            },
+            visualizer: self.visualizer.clone(),
+            cover_dimensions: self.cover_dimensions(),
         }
-
-        if let Some(cache) = &self.cover_cache {
-            if cache.width == width && cache.height == height {
-                return cache.lines.clone();
-            }
-        }
-
-        let lines = match &self.cover_art {
-            Some(image) => render_cover_lines(image, width, height),
-            None => fallback_cover(&self.album.title, width, height, &self.theme),
-        };
-
-        self.cover_cache = Some(CoverCache {
-            width,
-            height,
-            lines: lines.clone(),
-        });
-        lines
     }
 
     fn tick_visualizer(&mut self) {
         let playing = self.playback().playing && !self.playback().paused;
-        for value in &mut self.visualizer {
-            let floor = if playing { 2 } else { 1 };
-            let ceiling = if playing { 12 } else { 4 };
-            *value = self.rng.gen_range(floor..=ceiling);
-        }
-    }
+        let len = self.visualizer.len().max(1) as f32;
+        let low_center = ((self.pulse * 0.95).sin() + 1.0) * 0.5 * (len - 1.0);
+        let mid_center = (((self.pulse * 1.65) + 1.2).sin() + 1.0) * 0.5 * (len - 1.0);
+        let high_center = (((self.pulse * 2.45) + 2.4).sin() + 1.0) * 0.5 * (len - 1.0);
 
-    pub fn resize_visualizer(&self, width: u16) -> Vec<u64> {
-        let count = width as usize;
-        let len = self.visualizer.len();
-        if len == 0 {
-            return vec![0; count];
+        for (index, value) in self.visualizer.iter_mut().enumerate() {
+            let band = index as f32 / len;
+            let low_phase = self.pulse * if playing { 4.6 } else { 1.5 } + index as f32 * 0.12;
+            let mid_phase = self.pulse * if playing { 7.9 } else { 2.1 } + index as f32 * 0.31;
+            let high_phase = self.pulse * if playing { 12.8 } else { 3.6 } + index as f32 * 0.56;
+
+            let low = ((low_phase.sin() + 1.0) * 0.5).powf(0.82) * 4.8;
+            let mid = ((((mid_phase * 1.1) + 0.6).cos() + 1.0) * 0.5).powf(0.76) * 4.1;
+            let high = ((((high_phase * 1.7) + 1.3).sin() + 1.0) * 0.5).powf(1.5) * 2.8;
+
+            let low_focus = (1.0 - (((index as f32 - low_center).abs() / len).min(0.5) * 2.0))
+                .max(0.0)
+                .powf(0.65)
+                * 2.6;
+            let mid_focus = (1.0 - (((index as f32 - mid_center).abs() / len).min(0.5) * 2.0))
+                .max(0.0)
+                .powf(0.55)
+                * 2.9;
+            let high_focus = (1.0 - (((index as f32 - high_center).abs() / len).min(0.5) * 2.0))
+                .max(0.0)
+                .powf(0.45)
+                * 2.2;
+
+            let band_weight = 1.0
+                + ((1.0 - (band - 0.18).abs() * 3.0).max(0.0) * 0.3)
+                + ((1.0 - (band - 0.52).abs() * 3.5).max(0.0) * 0.45)
+                + ((1.0 - (band - 0.82).abs() * 4.0).max(0.0) * 0.25);
+            let jitter = self.rng.gen_range(0.0..=2.8);
+            let target = if playing {
+                ((low + mid + high + low_focus + mid_focus + high_focus) * band_weight * 0.52
+                    + jitter)
+                    .min(12.0)
+            } else {
+                0.45
+                    + ((low_phase * 0.6).sin() + 1.0) * 0.5
+                    + ((mid_phase * 0.45).cos() + 1.0) * 0.35
+                    + jitter * 0.05
+            };
+            let smoothing = if playing {
+                if target > *value as f32 { 0.58 } else { 0.26 }
+            } else {
+                0.16
+            };
+            let next = *value as f32 * (1.0 - smoothing) + target * smoothing;
+            *value = next.clamp(0.0, 12.0).round() as u64;
         }
-        if count == len {
-            return self.visualizer.clone();
-        }
-        let mut result = Vec::with_capacity(count);
-        for i in 0..count {
-            let src = i * len / count;
-            result.push(self.visualizer[src.min(len - 1)]);
-        }
-        result
     }
 
     fn advance_track(&mut self, automatic: bool) -> anyhow::Result<()> {
         if self.current_track + 1 < self.album.tracks.len() {
             self.current_track += 1;
-        } else if self.repeat {
-            self.current_track = 0;
-        } else if automatic {
+        } else {
             self.engine.stop();
+            if automatic {
+                self.current_track = self.album.tracks.len() - 1;
+            }
             return Ok(());
         }
 
@@ -279,11 +218,7 @@ impl App {
             return self.seek_to(Duration::ZERO);
         }
 
-        if self.current_track == 0 {
-            if self.repeat {
-                self.current_track = self.album.tracks.len() - 1;
-            }
-        } else {
+        if self.current_track > 0 {
             self.current_track -= 1;
         }
 
@@ -293,6 +228,10 @@ impl App {
     fn play_current(&mut self) -> anyhow::Result<()> {
         let track = self.current_track().clone();
         self.engine.play_track(&track)
+    }
+
+    fn total_duration(&self) -> Duration {
+        self.current_track().duration
     }
 
     fn seek_by(&mut self, delta: Duration) -> anyhow::Result<()> {
@@ -329,106 +268,6 @@ impl Theme {
     }
 }
 
-fn render_cover_lines(image: &DynamicImage, width: u16, height: u16) -> Vec<Line<'static>> {
-    let target_w = width.max(1) as u32;
-    let target_h = (height.max(1) as u32).saturating_mul(2);
-    let resized = if image.width() <= target_w && image.height() <= target_h {
-        image.to_rgb8()
-    } else {
-        image
-            .resize(target_w, target_h, image::imageops::FilterType::Lanczos3)
-            .to_rgb8()
-    };
-
-    let image_width = resized.width() as usize;
-    let image_height = resized.height() as usize;
-    let lines_needed = image_height.div_ceil(2);
-
-    let horizontal_pad = ((width as usize).saturating_sub(image_width)) / 2;
-    let vertical_pad = (height as usize).saturating_sub(lines_needed) / 2;
-
-    let empty_line = blank_line(width as usize);
-    let mut lines = Vec::new();
-
-    for _ in 0..vertical_pad {
-        lines.push(empty_line.clone());
-    }
-
-    for row in (0..image_height).step_by(2) {
-        let mut spans = Vec::new();
-        if horizontal_pad > 0 {
-            spans.push(Span::raw(" ".repeat(horizontal_pad)));
-        }
-
-        for col in 0..image_width {
-            let top = resized.get_pixel(col as u32, row as u32);
-            let bottom = resized.get_pixel(col as u32, (row + 1).min(image_height - 1) as u32);
-            spans.push(Span::styled(
-                "▀",
-                Style::default()
-                    .fg(Color::Rgb(top[0], top[1], top[2]))
-                    .bg(Color::Rgb(bottom[0], bottom[1], bottom[2])),
-            ));
-        }
-
-        let right_pad = (width as usize)
-            .saturating_sub(horizontal_pad)
-            .saturating_sub(image_width);
-        if right_pad > 0 {
-            spans.push(Span::raw(" ".repeat(right_pad)));
-        }
-
-        lines.push(Line::from(spans));
-    }
-
-    while lines.len() < height as usize {
-        lines.push(empty_line.clone());
-    }
-
-    lines.truncate(height as usize);
-    lines
-}
-
-fn fallback_cover(title: &str, width: u16, height: u16, theme: &Theme) -> Vec<Line<'static>> {
-    let mut lines = Vec::with_capacity(height as usize);
-    let label = title.chars().take(width as usize).collect::<String>();
-
-    for row in 0..height {
-        let line = if row == height / 2 {
-            Line::from(Span::styled(
-                format!("{label:^width$}", width = width as usize),
-                Style::default().fg(theme.text).bg(theme.accent_alt),
-            ))
-        } else {
-            let mut spans = Vec::with_capacity(width as usize);
-            for col in 0..width {
-                let bg = if (row + col) % 2 == 0 {
-                    theme.accent
-                } else {
-                    theme.accent_alt
-                };
-                spans.push(Span::styled(" ", Style::default().bg(bg)));
-            }
-            Line::from(spans)
-        };
-        lines.push(line);
-    }
-
-    lines
-}
-
-fn encode_cover_png(image: &DynamicImage) -> anyhow::Result<Vec<u8>> {
-    let mut buffer = Cursor::new(Vec::new());
-    image
-        .write_to(&mut buffer, ImageFormat::Png)
-        .context("failed to encode cover art as PNG")?;
-    Ok(buffer.into_inner())
-}
-
-fn blank_line(width: usize) -> Line<'static> {
-    Line::from(Span::raw(" ".repeat(width)))
-}
-
 fn color_from_env(key: &str) -> Option<Color> {
     let raw = env::var(key).ok()?;
     parse_color(&raw)
@@ -462,39 +301,6 @@ fn parse_color(raw: &str) -> Option<Color> {
         "lightmagenta" => Some(Color::LightMagenta),
         "lightcyan" => Some(Color::LightCyan),
         "white" => Some(Color::White),
-        _ => None,
-    }
-}
-
-fn blend(left: Color, right: Color, t: f32) -> Color {
-    match (rgb_components(left), rgb_components(right)) {
-        (Some((lr, lg, lb)), Some((rr, rg, rb))) => {
-            let mix = |a: u8, b: u8| -> u8 { (a as f32 + (b as f32 - a as f32) * t) as u8 };
-            Color::Rgb(mix(lr, rr), mix(lg, rg), mix(lb, rb))
-        }
-        _ => left,
-    }
-}
-
-fn rgb_components(color: Color) -> Option<(u8, u8, u8)> {
-    match color {
-        Color::Black => Some((0, 0, 0)),
-        Color::Red => Some((205, 49, 49)),
-        Color::Green => Some((13, 188, 121)),
-        Color::Yellow => Some((229, 229, 16)),
-        Color::Blue => Some((36, 114, 200)),
-        Color::Magenta => Some((188, 63, 188)),
-        Color::Cyan => Some((17, 168, 205)),
-        Color::Gray => Some((229, 229, 229)),
-        Color::DarkGray => Some((102, 102, 102)),
-        Color::LightRed => Some((241, 76, 76)),
-        Color::LightGreen => Some((35, 209, 139)),
-        Color::LightYellow => Some((245, 245, 67)),
-        Color::LightBlue => Some((59, 142, 234)),
-        Color::LightMagenta => Some((214, 112, 214)),
-        Color::LightCyan => Some((41, 184, 219)),
-        Color::White => Some((255, 255, 255)),
-        Color::Rgb(r, g, b) => Some((r, g, b)),
         _ => None,
     }
 }

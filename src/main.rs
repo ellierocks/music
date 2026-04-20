@@ -1,11 +1,20 @@
 mod app;
 mod audio;
+mod daemon;
 mod graphics;
+mod ipc;
+mod remote;
+mod tray;
 mod ui;
 
-use std::{env, io, path::PathBuf, time::Duration};
+use std::{
+    env, io,
+    path::PathBuf,
+    process::{Command, Stdio},
+    time::Duration,
+};
 
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEventKind},
     execute,
@@ -13,23 +22,90 @@ use crossterm::{
 };
 use futures_util::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
-use tokio::time::interval;
+use tokio::time::{interval, sleep};
 
-use crate::app::{Action, App};
-use crate::graphics::GraphicsRenderer;
+use crate::{
+    graphics::GraphicsRenderer,
+    ipc::{RemoteAction, Request, Response},
+    remote::RemoteApp,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let album_dir = env::args()
-        .nth(1)
-        .map(PathBuf::from)
+    let args: Vec<String> = env::args().skip(1).collect();
+    let album_arg = args
+        .iter()
+        .find(|arg| !arg.starts_with("--"))
+        .map(PathBuf::from);
+    let album_dir = album_arg
+        .clone()
         .unwrap_or(env::current_dir().context("failed to determine current directory")?);
+    let current_exe = env::current_exe().context("failed to determine current executable")?;
 
-    let mut app = App::new(album_dir).await?;
-    run(&mut app).await
+    if args.iter().any(|arg| arg == "--daemon") {
+        return daemon::run(album_dir, current_exe).await;
+    }
+
+    let daemon_running = matches!(ipc::send_request(&Request::Ping).await, Ok(Response::Pong));
+    if daemon_running {
+        if album_arg.is_some() {
+            ipc::expect_ok(&Request::OpenAlbum {
+                album_dir: album_dir.display().to_string(),
+            })
+            .await?;
+        }
+    } else {
+        launch_daemon(&current_exe, &album_dir)?;
+        wait_for_daemon().await?;
+    }
+
+    run_client().await
 }
 
-async fn run(app: &mut App) -> anyhow::Result<()> {
+fn launch_daemon(current_exe: &PathBuf, album_dir: &PathBuf) -> anyhow::Result<()> {
+    let daemon_args = vec![
+        current_exe.display().to_string(),
+        "--daemon".to_string(),
+        album_dir.display().to_string(),
+    ];
+
+    let mut command = if command_exists("setsid") {
+        let mut cmd = Command::new("setsid");
+        cmd.args(&daemon_args);
+        cmd
+    } else {
+        let mut cmd = Command::new(current_exe);
+        cmd.arg("--daemon").arg(album_dir);
+        cmd
+    };
+
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("failed to launch music daemon")?;
+    Ok(())
+}
+
+async fn wait_for_daemon() -> anyhow::Result<()> {
+    for _ in 0..50 {
+        if matches!(ipc::send_request(&Request::Ping).await, Ok(Response::Pong)) {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    Err(anyhow!("music daemon did not become ready"))
+}
+
+async fn run_client() -> anyhow::Result<()> {
+    let mut app = match ipc::send_request(&Request::Snapshot).await? {
+        Response::Snapshot(snapshot) => RemoteApp::new(snapshot)?,
+        Response::Error(message) => return Err(anyhow!(message)),
+        _ => return Err(anyhow!("unexpected daemon response")),
+    };
+
     enable_raw_mode().context("failed to enable raw mode")?;
 
     let mut stdout = io::stdout();
@@ -41,7 +117,7 @@ async fn run(app: &mut App) -> anyhow::Result<()> {
     terminal.clear().context("failed to clear terminal")?;
 
     let mut graphics = GraphicsRenderer::new();
-    let result = run_loop(&mut terminal, app, &mut graphics).await;
+    let result = run_loop(&mut terminal, &mut app, &mut graphics).await;
 
     graphics.clear(terminal.backend_mut()).ok();
     disable_raw_mode().ok();
@@ -58,24 +134,29 @@ async fn run(app: &mut App) -> anyhow::Result<()> {
 
 async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    app: &mut App,
+    app: &mut RemoteApp,
     graphics: &mut GraphicsRenderer,
 ) -> anyhow::Result<()> {
     let mut reader = EventStream::new();
     let mut ticker = interval(Duration::from_millis(66));
+    let mut needs_redraw = true;
 
     loop {
-        app.update();
-
-        terminal
-            .draw(|frame| ui::draw(frame, app, graphics.is_active()))
-            .context("failed to draw frame")?;
-        graphics
-            .sync(terminal.backend_mut(), app)
-            .context("failed to render album art")?;
+        if needs_redraw {
+            terminal
+                .draw(|frame| ui::draw(frame, app, graphics.is_active()))
+                .context("failed to draw frame")?;
+            graphics
+                .sync(terminal.backend_mut(), app)
+                .context("failed to render album art")?;
+            needs_redraw = false;
+        }
 
         tokio::select! {
-            _ = ticker.tick() => {}
+            _ = ticker.tick() => {
+                refresh_snapshot(app).await?;
+                needs_redraw = true;
+            }
             maybe_event = reader.next() => {
                 match maybe_event {
                     Some(Ok(event)) => {
@@ -83,12 +164,21 @@ async fn run_loop(
                             graphics.clear(terminal.backend_mut()).ok();
                             graphics.invalidate();
                             terminal.clear().ok();
+                            refresh_snapshot(app).await?;
+                            needs_redraw = true;
                         }
-                        if let Some(action) = translate_event(event, app)? {
-                            if matches!(action, Action::Quit) {
-                                break;
+                        match translate_event(event, app)? {
+                            Some(ClientEvent::Quit) => break,
+                            Some(ClientEvent::Remote(action)) => {
+                                ipc::expect_ok(&Request::Action(action)).await?;
+                                refresh_snapshot(app).await?;
+                                needs_redraw = true;
                             }
-                            app.handle_action(action).await?;
+                            Some(ClientEvent::RefreshLayout) => {
+                                refresh_snapshot(app).await?;
+                                needs_redraw = true;
+                            }
+                            None => {}
                         }
                     }
                     Some(Err(err)) => return Err(err).context("terminal event error"),
@@ -101,23 +191,44 @@ async fn run_loop(
     Ok(())
 }
 
-fn translate_event(event: Event, app: &App) -> anyhow::Result<Option<Action>> {
+async fn refresh_snapshot(app: &mut RemoteApp) -> anyhow::Result<()> {
+    match ipc::send_request(&Request::Snapshot).await? {
+        Response::Snapshot(snapshot) => app.apply_snapshot(snapshot),
+        Response::Error(message) => Err(anyhow!(message)),
+        _ => Err(anyhow!("unexpected daemon snapshot response")),
+    }
+}
+
+enum ClientEvent {
+    Quit,
+    Remote(RemoteAction),
+    RefreshLayout,
+}
+
+fn translate_event(event: Event, app: &RemoteApp) -> anyhow::Result<Option<ClientEvent>> {
     let action = match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
-            KeyCode::Char(' ') => Some(Action::TogglePause),
-            KeyCode::Char('n') | KeyCode::Right => Some(Action::NextTrack),
-            KeyCode::Char('p') | KeyCode::Left => Some(Action::PreviousTrack),
-            KeyCode::Char('s') => Some(Action::Stop),
-            KeyCode::Char('r') => Some(Action::ToggleRepeat),
-            KeyCode::Char(']') => Some(Action::SeekBy(Duration::from_secs(5))),
-            KeyCode::Char('[') => Some(Action::SeekBackBy(Duration::from_secs(5))),
+            KeyCode::Char('q') | KeyCode::Esc => Some(ClientEvent::Quit),
+            KeyCode::Char(' ') => Some(ClientEvent::Remote(RemoteAction::TogglePause)),
+            KeyCode::Char('n') | KeyCode::Right => Some(ClientEvent::Remote(RemoteAction::NextTrack)),
+            KeyCode::Char('p') | KeyCode::Left => Some(ClientEvent::Remote(RemoteAction::PreviousTrack)),
+            KeyCode::Char('s') => Some(ClientEvent::Remote(RemoteAction::Stop)),
+            KeyCode::Char(']') => Some(ClientEvent::Remote(RemoteAction::SeekByMillis(5000))),
+            KeyCode::Char('[') => Some(ClientEvent::Remote(RemoteAction::SeekBackByMillis(5000))),
             _ => None,
         },
-        Event::Mouse(mouse) => app.action_from_mouse(mouse),
-        Event::Resize(_, _) => Some(Action::RefreshLayout),
+        Event::Mouse(mouse) => app.action_from_mouse(mouse).map(ClientEvent::Remote),
+        Event::Resize(_, _) => Some(ClientEvent::RefreshLayout),
         _ => None,
     };
 
     Ok(action)
+}
+
+fn command_exists(program: &str) -> bool {
+    let Some(paths) = env::var_os("PATH") else {
+        return false;
+    };
+
+    env::split_paths(&paths).any(|path| path.join(program).exists())
 }

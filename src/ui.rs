@@ -2,25 +2,34 @@ use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Modifier, Style},
-    symbols,
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Gauge, List, ListItem, Paragraph, Sparkline, Wrap},
+    widgets::{Block, BorderType, Borders, List, ListItem, Paragraph, Wrap},
 };
 
-use crate::app::{App, Theme};
-use crate::audio::PlaybackSnapshot;
+use crate::app::Theme;
+use crate::ipc::PlaybackSnapshot;
+use crate::remote::RemoteApp;
 
-pub fn draw(frame: &mut Frame<'_>, app: &mut App, graphics_active: bool) {
+pub fn draw(frame: &mut Frame<'_>, app: &mut RemoteApp, graphics_active: bool) {
     let area = frame.area();
     let theme = app.theme.clone();
 
-    let [header, content] = Layout::default()
+    let [header, body] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .areas(area);
+    let note = if ((app.pulse * 2.2).sin() + 1.0) * 0.5 > 0.55 {
+        "♪"
+    } else {
+        "♬"
+    };
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!(" {note} "),
+                Style::default().fg(app.glow_color(0.55)).bg(theme.surface),
+            ),
             Span::styled(
                 " MUSIC ",
                 Style::default()
@@ -29,24 +38,24 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, graphics_active: bool) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
+                " • ",
+                Style::default().fg(app.glow_color(0.42)).bg(theme.surface),
+            ),
+            Span::styled(
                 " one album at a time ",
-                Style::default().fg(theme.text).bg(theme.surface),
+                Style::default()
+                    .fg(theme.text)
+                    .bg(theme.surface)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]))
         .style(theme.panel()),
         header,
     );
 
-    let outer = Block::default()
-        .style(theme.panel())
-        .borders(Borders::ALL)
-        .border_type(BorderType::Thick)
-        .border_style(Style::default().fg(theme.border));
-    frame.render_widget(outer, content);
-
-    let inner = content.inner(Margin {
-        vertical: 1,
-        horizontal: 2,
+    let inner = body.inner(Margin {
+        vertical: 0,
+        horizontal: 1,
     });
 
     let [left, right] = Layout::default()
@@ -62,7 +71,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, graphics_active: bool) {
     draw_right_column(frame, right, app, graphics_active);
 }
 
-fn draw_library_column(frame: &mut Frame<'_>, area: Rect, app: &App) {
+fn draw_library_column(frame: &mut Frame<'_>, area: Rect, app: &RemoteApp) {
     let [queue_area, sleeve_area] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(12), Constraint::Length(11)])
@@ -73,7 +82,7 @@ fn draw_library_column(frame: &mut Frame<'_>, area: Rect, app: &App) {
     draw_sleeve(frame, sleeve_area, app);
 }
 
-fn draw_right_column(frame: &mut Frame<'_>, area: Rect, app: &mut App, graphics_active: bool) {
+fn draw_right_column(frame: &mut Frame<'_>, area: Rect, app: &mut RemoteApp, graphics_active: bool) {
     let theme = app.theme.clone();
     let playback = app.playback();
     let track = app.current_track().clone();
@@ -85,25 +94,28 @@ fn draw_right_column(frame: &mut Frame<'_>, area: Rect, app: &mut App, graphics_
 
     let min_cover_inner_height = 8;
     let min_cover_inner_width = 16;
-    let max_cover_outer_height = area.height.saturating_sub(6 + 5 + 2);
-    let max_cover_inner_width = area.width.saturating_sub(2);
-    let max_cover_inner_height = max_cover_outer_height.saturating_sub(2);
-    let desired_cover_inner_height = ((max_cover_inner_width as u32 * image_h)
-        / image_w.saturating_mul(2).max(1)) as u16;
-    let cover_inner_height = desired_cover_inner_height.min(max_cover_inner_height);
-    let cover_inner_width = ((cover_inner_height as u32 * image_w.saturating_mul(2))
-        / image_h.max(1)) as u16;
-    let show_cover = cover_inner_height >= min_cover_inner_height
-        && cover_inner_width >= min_cover_inner_width;
+    let now_playing_height = 6;
+    let max_cover_height = area.height.saturating_sub(now_playing_height + 5 + 2);
+    let max_cover_width = area.width;
+    let cover_cell_aspect_num = 9_u32;
+    let cover_cell_aspect_den = 4_u32;
+    let desired_cover_height = ((max_cover_width as u32 * image_h
+        * cover_cell_aspect_den)
+        / image_w.saturating_mul(cover_cell_aspect_num).max(1)) as u16;
+    let cover_height = desired_cover_height.min(max_cover_height);
+    let cover_width = ((cover_height as u32
+        * image_w.saturating_mul(cover_cell_aspect_num))
+        / image_h.max(1)
+        / cover_cell_aspect_den.max(1)) as u16;
+    let show_cover = cover_height >= min_cover_inner_height
+        && cover_width >= min_cover_inner_width;
 
     if show_cover {
-        let cover_outer_width = cover_inner_width.saturating_add(2).min(area.width);
-        let cover_outer_height = cover_inner_height.saturating_add(2);
         let [now_playing, cover_slot, glow_area] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(6),
-                Constraint::Length(cover_outer_height),
+                Constraint::Length(now_playing_height),
+                Constraint::Length(cover_height),
                 Constraint::Min(5),
             ])
             .spacing(1)
@@ -112,7 +124,7 @@ fn draw_right_column(frame: &mut Frame<'_>, area: Rect, app: &mut App, graphics_
         draw_now_playing(frame, now_playing, app, playback, track, progress, &theme);
         draw_cover_box(
             frame,
-            center_horizontally(cover_slot, cover_outer_width),
+            center_in_area(cover_slot, cover_width, cover_height),
             app,
             graphics_active,
             &theme,
@@ -122,7 +134,7 @@ fn draw_right_column(frame: &mut Frame<'_>, area: Rect, app: &mut App, graphics_
         let [now_playing, glow_area] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(6),
+                Constraint::Length(now_playing_height),
                 Constraint::Min(5),
             ])
             .spacing(1)
@@ -136,24 +148,29 @@ fn draw_right_column(frame: &mut Frame<'_>, area: Rect, app: &mut App, graphics_
 fn draw_now_playing(
     frame: &mut Frame<'_>,
     area: Rect,
-    app: &mut App,
+    app: &mut RemoteApp,
     playback: PlaybackSnapshot,
-    track: crate::audio::Track,
+    track: crate::ipc::TrackSnapshot,
     progress: f64,
     theme: &Theme,
 ) {
+    let playback_energy = if playback.playing && !playback.paused {
+        ((app.pulse * 2.4).sin() + 1.0) * 0.5
+    } else {
+        0.28
+    };
     let hero_block = Block::default()
         .title_top(draw_now_playing_title(app))
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.accent_glow()))
+        .border_style(Style::default().fg(app.glow_color(0.48 + playback_energy as f32 * 0.34)))
         .border_type(BorderType::Rounded)
         .style(theme.panel());
     let hero_inner = hero_block.inner(area);
     frame.render_widget(hero_block, area);
 
-    let elapsed = format_duration(playback.position);
-    let total = format_duration(track.duration);
+    let elapsed = format_duration(playback.position());
+    let total = format_duration(track.duration());
     let [hero_text_area, progress_bar] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(3), Constraint::Length(1)])
@@ -172,9 +189,9 @@ fn draw_now_playing(
             paused_or_stopped_badge(playback, theme),
         ]),
         Line::from(vec![
-            Span::styled(elapsed, Style::default().fg(theme.text)),
+            Span::styled(elapsed.clone(), Style::default().fg(theme.text)),
             Span::styled(" / ", Style::default().fg(theme.muted)),
-            Span::styled(total, Style::default().fg(theme.text)),
+            Span::styled(total.clone(), Style::default().fg(theme.text)),
         ]),
     ]);
     frame.render_widget(
@@ -185,16 +202,8 @@ fn draw_now_playing(
     );
     app.set_progress_rect(progress_bar);
     frame.render_widget(
-        Gauge::default()
-            .gauge_style(
-                Style::default()
-                    .fg(app.accent_glow())
-                    .bg(theme.surface)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .use_unicode(true)
-            .label("")
-            .ratio(progress),
+        Paragraph::new(render_progress_bar(app, theme, progress, progress_bar.width))
+            .style(theme.panel()),
         progress_bar,
     );
 }
@@ -202,99 +211,209 @@ fn draw_now_playing(
 fn draw_cover_box(
     frame: &mut Frame<'_>,
     area: Rect,
-    app: &mut App,
+    app: &mut RemoteApp,
     graphics_active: bool,
     theme: &Theme,
 ) {
-    let cover_block = Block::default()
-        .title(" Cover ")
-        .title_alignment(Alignment::Center)
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .style(theme.panel())
-        .border_style(Style::default().fg(app.accent_glow()));
-    let cover_inner = cover_block.inner(area);
-    app.set_cover_rect(cover_inner);
-    frame.render_widget(cover_block, area);
+    app.set_cover_rect(area);
 
     if !graphics_active {
-        let cover_lines = app.render_cover(cover_inner.width, cover_inner.height);
+        let cover_lines = app.render_cover(area.width, area.height);
         frame.render_widget(
             Paragraph::new(Text::from(cover_lines)).style(theme.panel()),
-            cover_inner,
+            area,
         );
     }
 }
 
-fn center_horizontally(area: Rect, width: u16) -> Rect {
+fn center_in_area(area: Rect, width: u16, height: u16) -> Rect {
     let width = width.min(area.width);
+    let height = height.min(area.height);
     let x = area.x.saturating_add(area.width.saturating_sub(width) / 2);
-    Rect::new(x, area.y, width, area.height)
+    let y = area.y.saturating_add(area.height.saturating_sub(height) / 2);
+    Rect::new(x, y, width, height)
 }
 
-fn draw_glow_box(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+fn draw_glow_box(frame: &mut Frame<'_>, area: Rect, app: &RemoteApp, theme: &Theme) {
     let vis_block = Block::default()
-        .title(" Glow ")
+        .title(Span::styled(
+            " Glow ",
+            Style::default()
+                .fg(app.glow_color(0.7))
+                .add_modifier(Modifier::BOLD),
+        ))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme.border))
+        .border_style(Style::default().fg(app.glow_color(0.35)))
         .style(theme.panel());
     let vis_inner = vis_block.inner(area);
     frame.render_widget(vis_block, area);
-    let vis_data = app.resize_visualizer(vis_inner.width);
+    let vis_data = app.resize_visualizer(vis_inner.width.saturating_mul(2));
     frame.render_widget(
-        Sparkline::default()
-            .data(&vis_data)
-            .max(12)
-            .bar_set(symbols::bar::NINE_LEVELS)
-            .style(Style::default().fg(app.accent_glow()).bg(theme.surface)),
+        Paragraph::new(render_glow_lines(app, theme, &vis_data, vis_inner.width, vis_inner.height))
+            .style(theme.panel()),
         vis_inner,
     );
 }
 
-fn draw_sleeve(frame: &mut Frame<'_>, area: Rect, app: &App) {
+fn render_glow_lines(
+    app: &RemoteApp,
+    theme: &Theme,
+    data: &[u64],
+    width: u16,
+    height: u16,
+) -> Text<'static> {
+    if width == 0 || height == 0 {
+        return Text::default();
+    }
+
+    let rows = height as usize;
+    let cols = width as usize;
+    let total_dots = rows * 4;
+    let mut lines = Vec::with_capacity(rows);
+
+    for row in 0..rows {
+        let mut spans = Vec::with_capacity(cols);
+        for col in 0..cols {
+            let left = bar_mask(data.get(col * 2).copied().unwrap_or(0), row, total_dots, false);
+            let right = bar_mask(data.get(col * 2 + 1).copied().unwrap_or(0), row, total_dots, true);
+            let cell = char::from_u32(0x2800 + left + right).unwrap_or(' ');
+            let brightness = ((row + 1) as f32 / rows as f32).powf(1.35);
+            let sweep = (((app.pulse * 3.4) + col as f32 * 0.22 + row as f32 * 0.12).sin() + 1.0)
+                * 0.5;
+            let intensity = (0.16 + brightness * 0.62 + sweep * 0.22).clamp(0.0, 1.0);
+            spans.push(Span::styled(
+                cell.to_string(),
+                Style::default()
+                    .fg(app.glow_color(intensity))
+                    .bg(theme.surface),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    Text::from(lines)
+}
+
+fn render_progress_bar(app: &RemoteApp, theme: &Theme, progress: f64, width: u16) -> Line<'static> {
+    if width == 0 {
+        return Line::default();
+    }
+
+    let filled = (progress.clamp(0.0, 1.0) * width as f64).round() as usize;
+    let mut spans = Vec::with_capacity(width as usize);
+    let pulse = ((app.pulse * 2.6).sin() + 1.0) * 0.5;
+
+    for index in 0..width as usize {
+        let is_filled = index < filled;
+
+        let (glyph, style) = if is_filled {
+            let position = if filled <= 1 {
+                1.0
+            } else {
+                index as f32 / (filled - 1) as f32
+            };
+            let taper = position.powf(0.7);
+            let intensity = (0.58 + taper * 0.2 + pulse as f32 * 0.14).clamp(0.0, 1.0);
+            let color = if index + 1 == filled {
+                app.glow_color((intensity + 0.12).clamp(0.0, 1.0))
+            } else {
+                app.glow_color(intensity)
+            };
+            (
+                "█",
+                Style::default()
+                    .fg(color)
+                    .bg(theme.surface)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            let fade = if width <= 1 {
+                0.0
+            } else {
+                index as f32 / (width as f32 - 1.0)
+            };
+            let color = if pulse > 0.62 && fade > progress as f32 {
+                app.glow_color(0.18 + fade * 0.08)
+            } else {
+                theme.border
+            };
+            ("░", Style::default().fg(color).bg(theme.surface))
+        };
+
+        spans.push(Span::styled(glyph, style));
+    }
+
+    Line::from(spans)
+}
+
+fn bar_mask(value: u64, row: usize, total_dots: usize, right_column: bool) -> u32 {
+    let filled = ((value.min(12) as usize) * total_dots + 11) / 12;
+    let visible_from = total_dots.saturating_sub(filled);
+    let dot_bits = if right_column { [3_u32, 4, 5, 7] } else { [0_u32, 1, 2, 6] };
+
+    let mut mask = 0;
+    for (dot_row, bit) in dot_bits.into_iter().enumerate() {
+        let global_dot = row * 4 + dot_row;
+        if global_dot >= visible_from {
+            mask |= 1_u32 << bit;
+        }
+    }
+    mask
+}
+
+fn draw_sleeve(frame: &mut Frame<'_>, area: Rect, app: &RemoteApp) {
     let theme = app.theme.clone();
     let total_duration = app
         .album
         .tracks
         .iter()
-        .fold(std::time::Duration::ZERO, |sum, track| sum + track.duration);
+        .fold(std::time::Duration::ZERO, |sum, track| sum + track.duration());
+    let detail_border = app.glow_color(0.34 + (((app.pulse * 1.8).sin() + 1.0) * 0.5) as f32 * 0.14);
     let dims = app
         .cover_dimensions()
         .map(|(w, h)| format!("{w}x{h} px"))
         .unwrap_or_else(|| "generated cover".to_string());
     let info_block = Block::default()
-        .title(" Sleeve ")
+        .title(Line::from(vec![Span::styled(
+            " Sleeve ",
+            Style::default()
+                .fg(app.glow_color(0.72))
+                .add_modifier(Modifier::BOLD),
+        )]))
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .style(theme.panel())
-        .border_style(Style::default().fg(theme.border));
+        .border_style(Style::default().fg(detail_border));
     let info_inner = info_block.inner(area);
     frame.render_widget(info_block, area);
     frame.render_widget(
         Paragraph::new(Text::from(vec![
+            Line::from(vec![
+                Span::styled("● ", Style::default().fg(app.glow_color(0.8))),
+                Span::styled(
+                    app.album.title.clone(),
+                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                ),
+            ]),
             Line::from(Span::styled(
-                app.album.title.clone(),
-                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-            )),
-            Line::from(Span::styled(
-                app.album.path.display().to_string(),
+                app.album.path.clone(),
                 Style::default().fg(theme.muted),
             )),
             Line::from(""),
             Line::from(vec![
-                Span::styled("artist", Style::default().fg(theme.muted)),
+                Span::styled("artist", Style::default().fg(theme.muted).add_modifier(Modifier::BOLD)),
                 Span::raw("  "),
                 Span::styled(app.album.artist.clone(), Style::default().fg(theme.text)),
             ]),
             Line::from(vec![
-                Span::styled("art", Style::default().fg(theme.muted)),
+                Span::styled("art", Style::default().fg(theme.muted).add_modifier(Modifier::BOLD)),
                 Span::raw("  "),
-                Span::styled(dims, Style::default().fg(theme.accent)),
+                Span::styled(dims, Style::default().fg(app.glow_color(0.74))),
             ]),
             Line::from(vec![
-                Span::styled("tracks", Style::default().fg(theme.muted)),
+                Span::styled("tracks", Style::default().fg(theme.muted).add_modifier(Modifier::BOLD)),
                 Span::raw("  "),
                 Span::styled(
                     app.album.tracks.len().to_string(),
@@ -302,7 +421,7 @@ fn draw_sleeve(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 ),
             ]),
             Line::from(vec![
-                Span::styled("length", Style::default().fg(theme.muted)),
+                Span::styled("length", Style::default().fg(theme.muted).add_modifier(Modifier::BOLD)),
                 Span::raw("  "),
                 Span::styled(format_duration(total_duration), Style::default().fg(theme.success)),
             ]),
@@ -314,7 +433,7 @@ fn draw_sleeve(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 
-fn draw_tracks(frame: &mut Frame<'_>, area: Rect, app: &App) {
+fn draw_tracks(frame: &mut Frame<'_>, area: Rect, app: &RemoteApp) {
     let theme = app.theme.clone();
     let block = Block::default()
         .title(Line::from(vec![
@@ -338,30 +457,37 @@ fn draw_tracks(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .enumerate()
         .map(|(index, track)| {
             let active = index == app.current_track;
-            let marker = if active { "▶" } else { " " };
-            let line_style = if active {
+            let row_bg = if active {
+                app.glow_color(0.62)
+            } else {
+                theme.surface
+            };
+            let title_style = if active {
                 Style::default()
                     .fg(theme.text)
-                    .bg(app.accent_glow())
+                    .bg(row_bg)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(theme.text).bg(theme.surface)
             };
+            let duration_style = if active {
+                Style::default()
+                    .fg(theme.surface)
+                    .bg(app.glow_color(0.98))
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.muted).bg(theme.surface)
+            };
 
             ListItem::new(Line::from(vec![
-                Span::styled(format!(" {} ", marker), line_style),
-                Span::styled(format!("{:02}. {}", index + 1, track.title), line_style),
+                Span::styled(format!("{:02}. {}", index + 1, track.title), title_style),
                 Span::styled(
                     "  ",
-                    Style::default().bg(line_style.bg.unwrap_or(theme.surface)),
+                    Style::default().bg(row_bg),
                 ),
                 Span::styled(
-                    format_duration(track.duration),
-                    if active {
-                        Style::default().fg(theme.surface).bg(app.accent_glow())
-                    } else {
-                        Style::default().fg(theme.muted).bg(theme.surface)
-                    },
+                    format_duration(track.duration()),
+                    duration_style,
                 ),
             ]))
         })
@@ -377,20 +503,29 @@ fn format_duration(duration: std::time::Duration) -> String {
     format!("{minutes:02}:{seconds:02}")
 }
 
-fn draw_now_playing_title(app: &mut App) -> Line<'static> {
+fn draw_now_playing_title(app: &RemoteApp) -> Line<'static> {
     let music_notes = ["♪", "♫", "♬", "♩"];
     let note = music_notes[((app.pulse * 2.0) as usize) % music_notes.len()];
 
     let eq_frames = ["▁▃▅", "▃▅▇", "▅▇▆", "▇▆▄", "▆▄▂", "▄▂▁"];
     let eq = eq_frames[((app.pulse * 3.0) as usize) % eq_frames.len()];
+    let halo = if ((app.pulse * 2.8).sin() + 1.0) * 0.5 > 0.55 {
+        "*"
+    } else {
+        "."
+    };
 
     Line::from(vec![
+        Span::raw(" "),
+        Span::styled(halo, Style::default().fg(app.glow_color(0.45))),
         Span::raw(" "),
         Span::styled(note, Style::default().fg(app.accent_glow())),
         Span::raw(" "),
         Span::styled("Now Playing", animated_title_style(app)),
         Span::raw(" "),
         Span::styled(eq, Style::default().fg(app.accent_glow())),
+        Span::raw(" "),
+        Span::styled(halo, Style::default().fg(app.glow_color(0.45))),
         Span::raw(" "),
     ])
 }
@@ -413,7 +548,7 @@ fn paused_or_stopped_badge(playback: PlaybackSnapshot, theme: &Theme) -> Span<'s
     Span::raw("")
 }
 
-fn animated_title_style(app: &App) -> Style {
+fn animated_title_style(app: &RemoteApp) -> Style {
     let flash = ((app.pulse * 2.5).sin() + 1.0) * 0.5;
     let color = if flash > 0.55 {
         app.accent_glow()

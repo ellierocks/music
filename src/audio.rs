@@ -6,7 +6,10 @@ use std::{
 };
 
 use anyhow::{Context, anyhow};
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
+use rodio::{
+    Decoder, OutputStream, OutputStreamHandle, Sink, Source,
+    cpal::traits::{DeviceTrait, HostTrait},
+};
 use walkdir::WalkDir;
 
 #[derive(Clone, Debug)]
@@ -43,8 +46,15 @@ pub struct PlaybackSnapshot {
 
 impl AudioEngine {
     pub fn new() -> anyhow::Result<Self> {
-        let (_stream, handle) =
-            OutputStream::try_default().context("failed to open audio output stream")?;
+        let host = rodio::cpal::default_host();
+        let device = host
+            .default_output_device()
+            .ok_or_else(|| anyhow!("failed to find default audio output device"))?;
+        let default_config = device
+            .default_output_config()
+            .context("failed to query default output stream config")?;
+        let (_stream, handle) = OutputStream::try_from_device_config(&device, default_config)
+            .context("failed to open audio output stream at default sample rate")?;
         let sink = Sink::try_new(&handle).context("failed to create audio sink")?;
 
         Ok(Self {
@@ -139,8 +149,9 @@ impl AudioEngine {
     }
 
     pub fn finished(&self, current_duration: Duration) -> bool {
-        let snapshot = self.snapshot();
-        snapshot.playing && !snapshot.paused && snapshot.position >= current_duration
+        self.started_at.is_some()
+            && !self.sink.is_paused()
+            && (self.sink.empty() || self.position() >= current_duration)
     }
 }
 

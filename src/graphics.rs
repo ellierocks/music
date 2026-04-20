@@ -8,7 +8,7 @@ use crossterm::{
 };
 use ratatui::layout::Rect;
 
-use crate::app::App;
+use crate::remote::RemoteApp;
 
 const IMAGE_ID: u32 = 7;
 const PLACEMENT_ID: u32 = 1;
@@ -29,7 +29,7 @@ impl GraphicsRenderer {
         }
     }
 
-    pub fn sync<W: Write>(&mut self, writer: &mut W, app: &App) -> anyhow::Result<()> {
+    pub fn sync<W: Write>(&mut self, writer: &mut W, app: &RemoteApp) -> anyhow::Result<()> {
         if !self.graphics_supported {
             return Ok(());
         }

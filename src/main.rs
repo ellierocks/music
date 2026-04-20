@@ -68,7 +68,7 @@ async fn run_loop(
         app.update();
 
         terminal
-            .draw(|frame| ui::draw(frame, app))
+            .draw(|frame| ui::draw(frame, app, graphics.is_active()))
             .context("failed to draw frame")?;
         graphics
             .sync(terminal.backend_mut(), app)
@@ -79,6 +79,11 @@ async fn run_loop(
             maybe_event = reader.next() => {
                 match maybe_event {
                     Some(Ok(event)) => {
+                        if matches!(event, Event::Resize(_, _)) {
+                            graphics.clear(terminal.backend_mut()).ok();
+                            graphics.invalidate();
+                            terminal.clear().ok();
+                        }
                         if let Some(action) = translate_event(event, app)? {
                             if matches!(action, Action::Quit) {
                                 break;

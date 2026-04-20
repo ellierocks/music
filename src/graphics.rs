@@ -71,6 +71,15 @@ impl GraphicsRenderer {
         Ok(())
     }
 
+    pub fn is_active(&self) -> bool {
+        self.graphics_supported
+    }
+
+    pub fn invalidate(&mut self) {
+        self.last_rect = None;
+        self.last_path = None;
+    }
+
     fn draw_image<W: Write>(
         &self,
         writer: &mut W,

@@ -9,7 +9,7 @@ use ratatui::{
 
 use crate::app::{App, ButtonId};
 
-pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
+pub fn draw(frame: &mut Frame<'_>, app: &mut App, graphics_active: bool) {
     let area = frame.area();
     let theme = app.theme.clone();
 
@@ -54,11 +54,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .spacing(2)
         .areas(inner);
 
-    draw_cover_column(frame, left, app);
+    draw_cover_column(frame, left, app, graphics_active);
     draw_player(frame, right, app);
 }
 
-fn draw_cover_column(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
+fn draw_cover_column(frame: &mut Frame<'_>, area: Rect, app: &mut App, graphics_active: bool) {
     let theme = app.theme.clone();
     let (image_w, image_h) = app.cover_dimensions().unwrap_or((1, 1));
     let desired_cover_height = ((area.width.saturating_sub(2) as u32 * image_h)
@@ -89,11 +89,13 @@ fn draw_cover_column(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     app.set_cover_rect(cover_inner);
     frame.render_widget(cover_block, cover_area);
 
-    let cover_lines = app.render_cover(cover_inner.width, cover_inner.height);
-    frame.render_widget(
-        Paragraph::new(Text::from(cover_lines)).style(theme.panel()),
-        cover_inner,
-    );
+    if !graphics_active {
+        let cover_lines = app.render_cover(cover_inner.width, cover_inner.height);
+        frame.render_widget(
+            Paragraph::new(Text::from(cover_lines)).style(theme.panel()),
+            cover_inner,
+        );
+    }
 
     if info_area.height == 0 {
         return;

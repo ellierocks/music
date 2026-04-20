@@ -1,0 +1,13 @@
+/target
+target/
+.DS_Store
+*.swp
+*.swo
+*.tmp
+*.bak
+.idea/
+.vscode/
+.agents/
+.codex/
+.claude/
+Cargo.toml.orig

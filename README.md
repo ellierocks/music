@@ -1,8 +1,6 @@
 # music
 
-[Image #1]
-
-Current TUI screenshot.
+![music TUI screenshot](assets/example.png)
 
 `music` is a minimal Rust TUI music player built with `ratatui`, `tokio`, and `rodio`.
 It is intentionally focused on one album directory at a time, with a clean transport UI,

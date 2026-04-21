@@ -58,6 +58,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut RemoteApp, graphics_active: bool) {
         horizontal: 1,
     });
 
+    if app.minimal {
+        draw_right_column(frame, inner, app, graphics_active);
+        return;
+    }
+
     let [left, right] = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -163,8 +168,12 @@ fn draw_now_playing(
         .title_top(draw_now_playing_title(app))
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.glow_color(0.48 + playback_energy as f32 * 0.34)))
-        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(app.glow_color(0.62 + playback_energy as f32 * 0.28)))
+        .border_type(if playback.playing && !playback.paused {
+            BorderType::Double
+        } else {
+            BorderType::Rounded
+        })
         .style(theme.panel());
     let hero_inner = hero_block.inner(area);
     frame.render_widget(hero_block, area);
@@ -173,7 +182,7 @@ fn draw_now_playing(
     let total = format_duration(track.duration());
     let [hero_text_area, progress_bar] = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .constraints([Constraint::Min(3), Constraint::Length(2)])
         .areas(hero_inner);
     let hero_text = Text::from(vec![
         Line::from(Span::styled(
@@ -295,56 +304,67 @@ fn render_glow_lines(
     Text::from(lines)
 }
 
-fn render_progress_bar(app: &RemoteApp, theme: &Theme, progress: f64, width: u16) -> Line<'static> {
+fn render_progress_bar(app: &RemoteApp, theme: &Theme, progress: f64, width: u16) -> Text<'static> {
     if width == 0 {
-        return Line::default();
+        return Text::default();
     }
 
     let filled = (progress.clamp(0.0, 1.0) * width as f64).round() as usize;
-    let mut spans = Vec::with_capacity(width as usize);
+    let mut rail = Vec::with_capacity(width as usize);
+    let mut glow = Vec::with_capacity(width as usize);
     let pulse = ((app.pulse * 2.6).sin() + 1.0) * 0.5;
 
     for index in 0..width as usize {
         let is_filled = index < filled;
+        let head = filled.saturating_sub(1);
+        let position = if width <= 1 {
+            0.0
+        } else {
+            index as f32 / (width as f32 - 1.0)
+        };
+        let shimmer = (((app.pulse * 3.3) + position * 5.7).sin() + 1.0) * 0.5;
 
-        let (glyph, style) = if is_filled {
-            let position = if filled <= 1 {
+        if is_filled {
+            let fill_position = if filled <= 1 {
                 1.0
             } else {
                 index as f32 / (filled - 1) as f32
             };
-            let taper = position.powf(0.7);
-            let intensity = (0.58 + taper * 0.2 + pulse as f32 * 0.14).clamp(0.0, 1.0);
-            let color = if index + 1 == filled {
-                app.glow_color((intensity + 0.12).clamp(0.0, 1.0))
-            } else {
-                app.glow_color(intensity)
-            };
-            (
-                "█",
-                Style::default()
-                    .fg(color)
-                    .bg(theme.surface)
-                    .add_modifier(Modifier::BOLD),
-            )
-        } else {
-            let fade = if width <= 1 {
-                0.0
-            } else {
-                index as f32 / (width as f32 - 1.0)
-            };
-            let color = if pulse > 0.62 && fade > progress as f32 {
-                app.glow_color(0.18 + fade * 0.08)
-            } else {
-                theme.border
-            };
-            ("░", Style::default().fg(color).bg(theme.surface))
-        };
+            let taper = fill_position.powf(0.65);
+            let intensity = (0.50 + taper * 0.28 + pulse as f32 * 0.12 + shimmer * 0.1)
+                .clamp(0.0, 1.0);
+            let color = app.glow_color(intensity);
+            rail.push(Span::styled(" ", Style::default().bg(color)));
 
-        spans.push(Span::styled(glyph, style));
+            let glow_color = if index == head {
+                app.accent_glow()
+            } else {
+                app.glow_color((0.36 + shimmer * 0.22).clamp(0.0, 1.0))
+            };
+            glow.push(Span::styled(
+                if index == head { "◆" } else { "─" },
+                Style::default()
+                    .fg(glow_color)
+                    .add_modifier(if index == head {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            ));
+        } else {
+            rail.push(Span::styled(" ", Style::default().bg(theme.border)));
+            glow.push(Span::styled(
+                if pulse > 0.66 && position > progress as f32 {
+                    "·"
+                } else {
+                    "─"
+                },
+                Style::default().fg(theme.border),
+            ));
+        }
     }
 
-    Line::from(spans)
+    Text::from(vec![Line::from(rail), Line::from(glow)])
 }
 
 fn bar_mask(value: u64, row: usize, total_dots: usize, right_column: bool) -> u32 {

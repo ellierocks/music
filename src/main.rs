@@ -33,6 +33,7 @@ use crate::{
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
+    let minimal = args.iter().any(|arg| arg == "--minimal");
     let album_arg = args
         .iter()
         .find(|arg| !arg.starts_with("--"))
@@ -59,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
         wait_for_daemon().await?;
     }
 
-    run_client().await
+    run_client(minimal).await
 }
 
 fn launch_daemon(current_exe: &PathBuf, album_dir: &PathBuf) -> anyhow::Result<()> {
@@ -99,9 +100,9 @@ async fn wait_for_daemon() -> anyhow::Result<()> {
     Err(anyhow!("music daemon did not become ready"))
 }
 
-async fn run_client() -> anyhow::Result<()> {
+async fn run_client(minimal: bool) -> anyhow::Result<()> {
     let mut app = match ipc::send_request(&Request::Snapshot).await? {
-        Response::Snapshot(snapshot) => RemoteApp::new(snapshot)?,
+        Response::Snapshot(snapshot) => RemoteApp::new(snapshot, minimal)?,
         Response::Error(message) => return Err(anyhow!(message)),
         _ => return Err(anyhow!("unexpected daemon response")),
     };

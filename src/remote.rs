@@ -28,6 +28,7 @@ pub struct RemoteApp {
     pub album: AlbumSnapshot,
     pub current_track: usize,
     pub pulse: f32,
+    pub minimal: bool,
     pub progress_rect: Option<Rect>,
     pub cover_rect: Option<Rect>,
     pub visualizer: Vec<u64>,
@@ -40,7 +41,7 @@ pub struct RemoteApp {
 }
 
 impl RemoteApp {
-    pub fn new(snapshot: AppSnapshot) -> anyhow::Result<Self> {
+    pub fn new(snapshot: AppSnapshot, minimal: bool) -> anyhow::Result<Self> {
         let theme = Theme::from_env();
         let (cover_art, cover_png_data) = load_cover(snapshot.album.cover_path.as_deref())?;
 
@@ -48,6 +49,7 @@ impl RemoteApp {
             album: snapshot.album,
             current_track: snapshot.current_track,
             pulse: snapshot.pulse,
+            minimal,
             progress_rect: None,
             cover_rect: None,
             visualizer: snapshot.visualizer,

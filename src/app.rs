@@ -1,6 +1,7 @@
 use std::{env, path::PathBuf, time::{Duration, Instant}};
 
 use anyhow::Context;
+use catppuccin::PALETTE;
 use image::GenericImageView;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use ratatui::style::{Color, Style};
@@ -27,6 +28,14 @@ pub struct Theme {
     pub text: Color,
     pub muted: Color,
     pub surface: Color,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ThemeFlavor {
+    Latte,
+    Frappe,
+    Macchiato,
+    Mocha,
 }
 
 pub struct App {
@@ -252,14 +261,17 @@ impl App {
 
 impl Theme {
     pub fn from_env() -> Self {
+        let flavor = ThemeFlavor::from_env();
+        let palette = flavor.palette();
+
         Self {
-            accent: color_from_env("MUSIC_ACCENT").unwrap_or(Color::Cyan),
-            accent_alt: color_from_env("MUSIC_ACCENT_ALT").unwrap_or(Color::Blue),
-            success: color_from_env("MUSIC_SUCCESS").unwrap_or(Color::Green),
-            border: color_from_env("MUSIC_BORDER").unwrap_or(Color::DarkGray),
-            text: color_from_env("MUSIC_TEXT").unwrap_or(Color::Reset),
-            muted: color_from_env("MUSIC_MUTED").unwrap_or(Color::Gray),
-            surface: color_from_env("MUSIC_SURFACE").unwrap_or(Color::Reset),
+            accent: catppuccin_color(palette.colors.blue),
+            accent_alt: catppuccin_color(palette.colors.mauve),
+            success: catppuccin_color(palette.colors.green),
+            border: catppuccin_color(palette.colors.surface1),
+            text: catppuccin_color(palette.colors.text),
+            muted: catppuccin_color(palette.colors.subtext0),
+            surface: catppuccin_color(palette.colors.base),
         }
     }
 
@@ -268,39 +280,31 @@ impl Theme {
     }
 }
 
-fn color_from_env(key: &str) -> Option<Color> {
-    let raw = env::var(key).ok()?;
-    parse_color(&raw)
+fn catppuccin_color(color: catppuccin::Color) -> Color {
+    Color::Rgb(color.rgb.r, color.rgb.g, color.rgb.b)
 }
 
-fn parse_color(raw: &str) -> Option<Color> {
-    let value = raw.trim();
-    let hex = value.strip_prefix('#').unwrap_or(value);
-    if hex.len() == 6 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-        let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-        let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-        return Some(Color::Rgb(r, g, b));
+impl ThemeFlavor {
+    fn from_env() -> Self {
+        match env::var("MUSIC_THEME")
+            .ok()
+            .as_deref()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("latte") => Self::Latte,
+            Some("frappe") | Some("frappé") => Self::Frappe,
+            Some("macchiato") => Self::Macchiato,
+            _ => Self::Mocha,
+        }
     }
 
-    match value.to_ascii_lowercase().as_str() {
-        "reset" | "default" => Some(Color::Reset),
-        "black" => Some(Color::Black),
-        "red" => Some(Color::Red),
-        "green" => Some(Color::Green),
-        "yellow" => Some(Color::Yellow),
-        "blue" => Some(Color::Blue),
-        "magenta" => Some(Color::Magenta),
-        "cyan" => Some(Color::Cyan),
-        "gray" | "grey" => Some(Color::Gray),
-        "darkgray" | "darkgrey" => Some(Color::DarkGray),
-        "lightred" => Some(Color::LightRed),
-        "lightgreen" => Some(Color::LightGreen),
-        "lightyellow" => Some(Color::LightYellow),
-        "lightblue" => Some(Color::LightBlue),
-        "lightmagenta" => Some(Color::LightMagenta),
-        "lightcyan" => Some(Color::LightCyan),
-        "white" => Some(Color::White),
-        _ => None,
+    fn palette(self) -> &'static catppuccin::Flavor {
+        match self {
+            Self::Latte => &PALETTE.latte,
+            Self::Frappe => &PALETTE.frappe,
+            Self::Macchiato => &PALETTE.macchiato,
+            Self::Mocha => &PALETTE.mocha,
+        }
     }
 }

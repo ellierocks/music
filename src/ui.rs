@@ -177,7 +177,7 @@ fn draw_now_playing(
         .areas(hero_inner);
     let hero_text = Text::from(vec![
         Line::from(Span::styled(
-            track.title,
+            display_track_title(&track.title),
             Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
         )),
         Line::from(vec![
@@ -457,38 +457,27 @@ fn draw_tracks(frame: &mut Frame<'_>, area: Rect, app: &RemoteApp) {
         .enumerate()
         .map(|(index, track)| {
             let active = index == app.current_track;
-            let row_bg = if active {
-                app.glow_color(0.62)
-            } else {
-                theme.surface
-            };
             let title_style = if active {
-                Style::default()
-                    .fg(theme.text)
-                    .bg(row_bg)
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(app.accent_glow()).add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(theme.text).bg(theme.surface)
+                Style::default().fg(theme.text)
             };
             let duration_style = if active {
-                Style::default()
-                    .fg(theme.surface)
-                    .bg(app.glow_color(0.98))
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(app.accent_glow()).add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(theme.muted).bg(theme.surface)
+                Style::default().fg(theme.muted)
             };
+            let title = display_track_title(&track.title);
+            let duration = format_duration(track.duration());
+            let gap = inner
+                .width
+                .saturating_sub(title.chars().count() as u16 + duration.chars().count() as u16)
+                .max(3) as usize;
 
             ListItem::new(Line::from(vec![
-                Span::styled(format!("{:02}. {}", index + 1, track.title), title_style),
-                Span::styled(
-                    "  ",
-                    Style::default().bg(row_bg),
-                ),
-                Span::styled(
-                    format_duration(track.duration()),
-                    duration_style,
-                ),
+                Span::styled(title, title_style),
+                Span::raw(" ".repeat(gap)),
+                Span::styled(duration, duration_style),
             ]))
         })
         .collect::<Vec<_>>();
@@ -501,6 +490,17 @@ fn format_duration(duration: std::time::Duration) -> String {
     let minutes = total / 60;
     let seconds = total % 60;
     format!("{minutes:02}:{seconds:02}")
+}
+
+fn display_track_title(title: &str) -> String {
+    let stripped = title.trim_start_matches(|ch: char| ch.is_ascii_digit());
+    let stripped = stripped.trim_start_matches(|ch: char| matches!(ch, ' ' | '-' | '.' | '_' | '(' | ')'));
+
+    if stripped.is_empty() {
+        title.to_string()
+    } else {
+        stripped.to_string()
+    }
 }
 
 fn draw_now_playing_title(app: &RemoteApp) -> Line<'static> {

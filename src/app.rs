@@ -5,6 +5,7 @@ use catppuccin::PALETTE;
 use image::GenericImageView;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use ratatui::style::{Color, Style};
+use tokio::task;
 
 use crate::audio::{Album, AudioEngine, PlaybackSnapshot, load_album};
 use crate::ipc::{self, AlbumSnapshot, AppSnapshot, PlaybackSnapshot as RemotePlaybackSnapshot, TrackSnapshot};
@@ -52,21 +53,11 @@ pub struct App {
 
 impl App {
     pub async fn new(album_dir: PathBuf) -> anyhow::Result<Self> {
-        let album = load_album(&album_dir)?;
+        let (album, cover_dimensions) = load_album_assets(album_dir).await?;
         let mut engine = AudioEngine::new()?;
         engine
             .play_track(&album.tracks[0])
             .context("failed to start first track")?;
-
-        let cover_dimensions = album
-            .cover_path
-            .as_ref()
-            .map(|path| {
-                image::open(path)
-                    .with_context(|| format!("failed to open cover art {}", path.display()))
-                    .map(|image| image.dimensions())
-            })
-            .transpose()?;
 
         Ok(Self {
             album,
@@ -92,7 +83,7 @@ impl App {
         }
     }
 
-    pub async fn handle_action(&mut self, action: Action) -> anyhow::Result<()> {
+    pub fn handle_action(&mut self, action: Action) -> anyhow::Result<()> {
         match action {
             Action::TogglePause => self.engine.toggle_pause(),
             Action::NextTrack => self.advance_track(false)?,
@@ -154,7 +145,8 @@ impl App {
     }
 
     fn tick_visualizer(&mut self) {
-        let playing = self.playback().playing && !self.playback().paused;
+        let playback = self.playback();
+        let playing = playback.playing && !playback.paused;
         let len = self.visualizer.len().max(1) as f32;
         let low_center = ((self.pulse * 0.95).sin() + 1.0) * 0.5 * (len - 1.0);
         let mid_center = (((self.pulse * 1.65) + 1.2).sin() + 1.0) * 0.5 * (len - 1.0);
@@ -244,12 +236,14 @@ impl App {
     }
 
     fn seek_by(&mut self, delta: Duration) -> anyhow::Result<()> {
-        let target = (self.playback().position + delta).min(self.total_duration());
+        let position = self.playback().position;
+        let target = (position + delta).min(self.total_duration());
         self.seek_to(target)
     }
 
     fn seek_back_by(&mut self, delta: Duration) -> anyhow::Result<()> {
-        let target = self.playback().position.saturating_sub(delta);
+        let position = self.playback().position;
+        let target = position.saturating_sub(delta);
         self.seek_to(target)
     }
 
@@ -257,6 +251,25 @@ impl App {
         let track = self.current_track().clone();
         self.engine.seek_to(target, &track)
     }
+}
+
+async fn load_album_assets(album_dir: PathBuf) -> anyhow::Result<(Album, Option<(u32, u32)>)> {
+    task::spawn_blocking(move || {
+        let album = load_album(&album_dir)?;
+        let cover_dimensions = album
+            .cover_path
+            .as_ref()
+            .map(|path| {
+                image::open(path)
+                    .with_context(|| format!("failed to open cover art {}", path.display()))
+                    .map(|image| image.dimensions())
+            })
+            .transpose()?;
+
+        Ok((album, cover_dimensions))
+    })
+    .await
+    .context("album loading task failed")?
 }
 
 impl Theme {

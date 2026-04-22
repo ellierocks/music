@@ -2,6 +2,7 @@ use std::{
     fs::File,
     io::BufReader,
     path::{Path, PathBuf},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -156,7 +157,7 @@ impl AudioEngine {
 }
 
 pub fn load_album(root: &Path) -> anyhow::Result<Album> {
-    let mut tracks = Vec::new();
+    let mut audio_paths = Vec::new();
     let mut cover_path = None;
 
     for entry in WalkDir::new(root).min_depth(1).max_depth(2) {
@@ -175,17 +176,10 @@ pub fn load_album(root: &Path) -> anyhow::Result<Album> {
             continue;
         }
 
-        let duration = probe_duration(path)?;
-        tracks.push(Track {
-            path: path.to_path_buf(),
-            title: path
-                .file_stem()
-                .and_then(|name| name.to_str())
-                .unwrap_or("Unknown Track")
-                .replace('_', " "),
-            duration,
-        });
+        audio_paths.push(path.to_path_buf());
     }
+
+    let mut tracks = probe_tracks(audio_paths)?;
 
     tracks.sort_by(|left, right| left.path.cmp(&right.path));
 
@@ -218,6 +212,61 @@ pub fn load_album(root: &Path) -> anyhow::Result<Album> {
     })
 }
 
+fn probe_tracks(paths: Vec<PathBuf>) -> anyhow::Result<Vec<Track>> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let worker_count = thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(paths.len());
+
+    if worker_count <= 1 {
+        return paths
+            .into_iter()
+            .map(|path| {
+                let duration = probe_duration(&path)?;
+                Ok(Track {
+                    title: track_title(&path),
+                    path,
+                    duration,
+                })
+            })
+            .collect();
+    }
+
+    let chunk_size = paths.len().div_ceil(worker_count);
+    let mut handles = Vec::with_capacity(worker_count);
+
+    for chunk in paths.chunks(chunk_size) {
+        let chunk = chunk.to_vec();
+        handles.push(thread::spawn(move || -> anyhow::Result<Vec<Track>> {
+            chunk
+                .into_iter()
+                .map(|path| {
+                    let duration = probe_duration(&path)?;
+                    Ok(Track {
+                        title: track_title(&path),
+                        path,
+                        duration,
+                    })
+                })
+                .collect()
+        }));
+    }
+
+    let mut tracks = Vec::with_capacity(paths.len());
+    for handle in handles {
+        let chunk_tracks = handle
+            .join()
+            .map_err(|_| anyhow!("track duration worker panicked"))??;
+        tracks.extend(chunk_tracks);
+    }
+
+    Ok(tracks)
+}
+
 fn probe_duration(path: &Path) -> anyhow::Result<Duration> {
     let file = File::open(path)
         .with_context(|| format!("failed to open audio file {}", path.display()))?;
@@ -226,6 +275,13 @@ fn probe_duration(path: &Path) -> anyhow::Result<Duration> {
     decoder
         .total_duration()
         .ok_or_else(|| anyhow!("failed to determine duration for {}", path.display()))
+}
+
+fn track_title(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Unknown Track")
+        .replace('_', " ")
 }
 
 fn is_supported_audio(path: &Path) -> bool {

@@ -1,4 +1,5 @@
 use std::{
+    fs,
     io::Cursor,
     path::{Path, PathBuf},
 };
@@ -11,6 +12,7 @@ use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
 };
+use tokio::task;
 
 use crate::{
     app::Theme,
@@ -41,9 +43,9 @@ pub struct RemoteApp {
 }
 
 impl RemoteApp {
-    pub fn new(snapshot: AppSnapshot, minimal: bool) -> anyhow::Result<Self> {
+    pub async fn new(snapshot: AppSnapshot, minimal: bool) -> anyhow::Result<Self> {
         let theme = Theme::from_env();
-        let (cover_art, cover_png_data) = load_cover(snapshot.album.cover_path.as_deref())?;
+        let (cover_art, cover_png_data) = load_cover(snapshot.album.cover_path.as_deref()).await?;
 
         Ok(Self {
             album: snapshot.album,
@@ -62,7 +64,7 @@ impl RemoteApp {
         })
     }
 
-    pub fn apply_snapshot(&mut self, snapshot: AppSnapshot) -> anyhow::Result<()> {
+    pub async fn apply_snapshot(&mut self, snapshot: AppSnapshot) -> anyhow::Result<()> {
         let cover_changed = self.album.cover_path != snapshot.album.cover_path;
         self.album = snapshot.album;
         self.current_track = snapshot.current_track;
@@ -72,7 +74,7 @@ impl RemoteApp {
         self.visualizer = snapshot.visualizer;
 
         if cover_changed {
-            let (cover_art, cover_png_data) = load_cover(self.album.cover_path.as_deref())?;
+            let (cover_art, cover_png_data) = load_cover(self.album.cover_path.as_deref()).await?;
             self.cover_art = cover_art;
             self.cover_png_data = cover_png_data;
             self.cover_cache = None;
@@ -87,19 +89,20 @@ impl RemoteApp {
                 if let Some(progress_rect) = self.progress_rect {
                     let point = Rect::new(mouse.column, mouse.row, 1, 1);
                     if progress_rect.intersects(point) && progress_rect.width > 0 {
+                        let playback_position = self.playback.position();
                         let relative = mouse.column.saturating_sub(progress_rect.x) as f32
                             / progress_rect.width.max(1) as f32;
                         let target = self
                             .current_track()
                             .duration()
                             .mul_f32(relative.clamp(0.0, 1.0));
-                        return Some(if target > self.playback().position() {
+                        return Some(if target > playback_position {
                             RemoteAction::SeekByMillis(ipc::duration_to_millis(
-                                target - self.playback().position(),
+                                target - playback_position,
                             ))
                         } else {
                             RemoteAction::SeekBackByMillis(ipc::duration_to_millis(
-                                self.playback().position() - target,
+                                playback_position - target,
                             ))
                         });
                     }
@@ -143,7 +146,8 @@ impl RemoteApp {
         if total == 0.0 {
             0.0
         } else {
-            (self.playback().position().as_secs_f64() / total).clamp(0.0, 1.0)
+            let position = self.playback.position().as_secs_f64();
+            (position / total).clamp(0.0, 1.0)
         }
     }
 
@@ -236,17 +240,38 @@ impl PlaybackSnapshot {
     }
 }
 
-fn load_cover(
+async fn load_cover(
     cover_path: Option<&str>,
 ) -> anyhow::Result<(Option<DynamicImage>, Option<Vec<u8>>)> {
-    let cover_art = cover_path
-        .map(|path| {
-            image::open(PathBuf::from(path))
-                .with_context(|| format!("failed to open cover art {path}"))
-        })
-        .transpose()?;
-    let cover_png_data = cover_art.as_ref().map(encode_cover_png).transpose()?;
-    Ok((cover_art, cover_png_data))
+    let cover_path = cover_path.map(str::to_owned);
+    task::spawn_blocking(move || {
+        let Some(path) = cover_path.as_deref() else {
+            return Ok((None, None));
+        };
+
+        let path_buf = PathBuf::from(path);
+        let is_png = path_buf
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("png"));
+
+        let (cover_art, cover_png_data) = if is_png {
+            let png_data = fs::read(&path_buf)
+                .with_context(|| format!("failed to read cover art {path}"))?;
+            let image = image::load_from_memory_with_format(&png_data, ImageFormat::Png)
+                .with_context(|| format!("failed to decode cover art {path}"))?;
+            (Some(image), Some(png_data))
+        } else {
+            let image = image::open(&path_buf)
+                .with_context(|| format!("failed to open cover art {path}"))?;
+            let png_data = encode_cover_png(&image)?;
+            (Some(image), Some(png_data))
+        };
+
+        Ok((cover_art, cover_png_data))
+    })
+    .await
+    .context("cover loading task failed")?
 }
 
 fn render_cover_lines(image: &DynamicImage, width: u16, height: u16) -> Vec<Line<'static>> {

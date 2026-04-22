@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    path::{Path, PathBuf},
+    path::Path,
     process::{Command, Stdio},
     sync::OnceLock,
 };
@@ -10,8 +10,11 @@ use image::{Rgba, RgbaImage};
 use ksni::{Handle, TrayMethods, menu::StandardItem};
 use tokio::sync::mpsc;
 
+use crate::ipc;
+
 #[derive(Clone, Debug)]
 pub enum TrayCommand {
+    ShowPlayer,
     TogglePause,
     Next,
     Previous,
@@ -20,17 +23,15 @@ pub enum TrayCommand {
 }
 
 pub async fn spawn(
-    current_exe: PathBuf,
     tx: mpsc::UnboundedSender<TrayCommand>,
 ) -> anyhow::Result<Handle<MyTray>> {
-    MyTray { current_exe, tx }
+    MyTray { tx }
         .spawn()
         .await
         .map_err(|error| anyhow!(error.to_string()))
 }
 
 pub struct MyTray {
-    current_exe: PathBuf,
     tx: mpsc::UnboundedSender<TrayCommand>,
 }
 
@@ -52,7 +53,7 @@ impl ksni::Tray for MyTray {
     }
 
     fn activate(&mut self, _x: i32, _y: i32) {
-        reopen_terminal(&self.current_exe).ok();
+        self.tx.send(TrayCommand::ShowPlayer).ok();
     }
 
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
@@ -60,7 +61,7 @@ impl ksni::Tray for MyTray {
             StandardItem {
                 label: "Show Player".into(),
                 activate: Box::new(|tray: &mut Self| {
-                    reopen_terminal(&tray.current_exe).ok();
+                    tray.tx.send(TrayCommand::ShowPlayer).ok();
                 }),
                 ..Default::default()
             }
@@ -117,17 +118,22 @@ fn tray_icon() -> &'static ksni::Icon {
 
 fn build_tray_icon() -> ksni::Icon {
     let mut image = RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 0]));
-    let note = [74, 201, 255, 255];
-    let glow = [74, 201, 255, 60];
+    let edge = [255, 255, 255, 144];
+    let white = [255, 255, 255, 255];
 
-    fill_rect(&mut image, 16, 4, 4, 17, glow);
-    fill_rect(&mut image, 17, 5, 2, 15, note);
-    fill_rect(&mut image, 12, 4, 8, 3, note);
-    fill_rect(&mut image, 12, 8, 8, 3, note);
-    fill_circle(&mut image, 10, 23, 6, glow);
-    fill_circle(&mut image, 21, 19, 5, glow);
-    fill_circle(&mut image, 10, 23, 4, note);
-    fill_circle(&mut image, 21, 19, 3, note);
+    fill_circle(&mut image, 10, 23, 6, edge);
+    fill_circle(&mut image, 23, 18, 6, edge);
+    fill_rect(&mut image, 13, 7, 4, 16, edge);
+    fill_rect(&mut image, 26, 4, 4, 14, edge);
+    fill_rect(&mut image, 13, 5, 17, 3, edge);
+    fill_rect(&mut image, 16, 3, 14, 3, edge);
+
+    fill_circle(&mut image, 10, 23, 5, white);
+    fill_circle(&mut image, 23, 18, 5, white);
+    fill_rect(&mut image, 14, 7, 2, 15, white);
+    fill_rect(&mut image, 27, 4, 2, 13, white);
+    fill_rect(&mut image, 14, 5, 15, 2, white);
+    fill_rect(&mut image, 17, 3, 12, 2, white);
 
     let (width, height) = image.dimensions();
     let mut data = image.into_vec();
@@ -169,7 +175,11 @@ fn fill_circle(image: &mut RgbaImage, cx: i32, cy: i32, radius: i32, color: [u8;
     }
 }
 
-fn reopen_terminal(current_exe: &Path) -> anyhow::Result<()> {
+pub fn reopen_terminal(current_exe: &Path) -> anyhow::Result<()> {
+    if ipc::client_is_showing() {
+        return Ok(());
+    }
+
     for candidate in terminal_candidates(current_exe) {
         if !command_exists(&candidate.program) {
             continue;

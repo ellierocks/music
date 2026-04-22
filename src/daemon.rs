@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow};
 use tokio::{
@@ -29,7 +29,7 @@ pub async fn run(album_dir: PathBuf, current_exe: PathBuf) -> anyhow::Result<()>
     let listener = UnixListener::bind(&socket)
         .with_context(|| format!("failed to bind daemon socket {}", socket.display()))?;
     let (tray_tx, mut tray_rx) = mpsc::unbounded_channel();
-    let mut _tray_handle = tray::spawn(current_exe, tray_tx).await.ok();
+    let mut _tray_handle = tray::spawn(tray_tx).await.ok();
     let mut app = App::new(album_dir).await?;
     let mut ticker = interval(Duration::from_millis(66));
 
@@ -40,7 +40,7 @@ pub async fn run(album_dir: PathBuf, current_exe: PathBuf) -> anyhow::Result<()>
                     app.update();
                 }
                 Some(command) = tray_rx.recv() => {
-                    if handle_tray_command(&mut app, command).await? {
+                    if handle_tray_command(&mut app, &current_exe, command).await? {
                         break;
                     }
                 }
@@ -99,12 +99,17 @@ async fn write_response(stream: &mut UnixStream, response: &Response) -> anyhow:
     Ok(())
 }
 
-async fn handle_tray_command(app: &mut App, command: TrayCommand) -> anyhow::Result<bool> {
+async fn handle_tray_command(
+    app: &mut App,
+    current_exe: &Path,
+    command: TrayCommand,
+) -> anyhow::Result<bool> {
     match command {
-        TrayCommand::TogglePause => app.handle_action(Action::TogglePause).await?,
-        TrayCommand::Next => app.handle_action(Action::NextTrack).await?,
-        TrayCommand::Previous => app.handle_action(Action::PreviousTrack).await?,
-        TrayCommand::Stop => app.handle_action(Action::Stop).await?,
+        TrayCommand::ShowPlayer => tray::reopen_terminal(current_exe)?,
+        TrayCommand::TogglePause => app.handle_action(Action::TogglePause)?,
+        TrayCommand::Next => app.handle_action(Action::NextTrack)?,
+        TrayCommand::Previous => app.handle_action(Action::PreviousTrack)?,
+        TrayCommand::Stop => app.handle_action(Action::Stop)?,
         TrayCommand::Quit => return Ok(true),
     }
     app.update();
@@ -113,15 +118,15 @@ async fn handle_tray_command(app: &mut App, command: TrayCommand) -> anyhow::Res
 
 async fn apply_remote_action(app: &mut App, action: crate::ipc::RemoteAction) -> anyhow::Result<()> {
     match action {
-        crate::ipc::RemoteAction::TogglePause => app.handle_action(Action::TogglePause).await?,
-        crate::ipc::RemoteAction::NextTrack => app.handle_action(Action::NextTrack).await?,
-        crate::ipc::RemoteAction::PreviousTrack => app.handle_action(Action::PreviousTrack).await?,
-        crate::ipc::RemoteAction::Stop => app.handle_action(Action::Stop).await?,
+        crate::ipc::RemoteAction::TogglePause => app.handle_action(Action::TogglePause)?,
+        crate::ipc::RemoteAction::NextTrack => app.handle_action(Action::NextTrack)?,
+        crate::ipc::RemoteAction::PreviousTrack => app.handle_action(Action::PreviousTrack)?,
+        crate::ipc::RemoteAction::Stop => app.handle_action(Action::Stop)?,
         crate::ipc::RemoteAction::SeekByMillis(millis) => {
-            app.handle_action(Action::SeekBy(Duration::from_millis(millis))).await?
+            app.handle_action(Action::SeekBy(Duration::from_millis(millis)))?
         }
         crate::ipc::RemoteAction::SeekBackByMillis(millis) => {
-            app.handle_action(Action::SeekBackBy(Duration::from_millis(millis))).await?
+            app.handle_action(Action::SeekBackBy(Duration::from_millis(millis)))?
         }
     }
     app.update();

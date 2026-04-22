@@ -13,7 +13,7 @@ homepage = "https://github.com/ellierocks/music"
 [dependencies]
 anyhow = "1.0"
 base64 = "0.22"
-catppuccin = { version = "2.7", features = ["ratatui"] }
+catppuccin = "2.7"
 crossterm = { version = "0.28", features = ["event-stream"] }
 futures-util = "0.3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }

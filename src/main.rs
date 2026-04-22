@@ -33,6 +33,7 @@ use crate::{
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
+    let client_only = args.iter().any(|arg| arg == "--client");
     let minimal = args.iter().any(|arg| arg == "--minimal");
     let album_arg = args
         .iter()
@@ -49,12 +50,14 @@ async fn main() -> anyhow::Result<()> {
 
     let daemon_running = matches!(ipc::send_request(&Request::Ping).await, Ok(Response::Pong));
     if daemon_running {
-        if album_arg.is_some() {
+        if album_arg.is_some() && !client_only {
             ipc::expect_ok(&Request::OpenAlbum {
                 album_dir: album_dir.display().to_string(),
             })
             .await?;
         }
+    } else if client_only {
+        return Err(anyhow!("music daemon is not running"));
     } else {
         launch_daemon(&current_exe, &album_dir)?;
         wait_for_daemon().await?;
@@ -101,8 +104,12 @@ async fn wait_for_daemon() -> anyhow::Result<()> {
 }
 
 async fn run_client(minimal: bool) -> anyhow::Result<()> {
+    let Some(_client_lock) = ipc::acquire_client_lock()? else {
+        return Ok(());
+    };
+
     let mut app = match ipc::send_request(&Request::Snapshot).await? {
-        Response::Snapshot(snapshot) => RemoteApp::new(snapshot, minimal)?,
+        Response::Snapshot(snapshot) => RemoteApp::new(snapshot, minimal).await?,
         Response::Error(message) => return Err(anyhow!(message)),
         _ => return Err(anyhow!("unexpected daemon response")),
     };
@@ -194,7 +201,7 @@ async fn run_loop(
 
 async fn refresh_snapshot(app: &mut RemoteApp) -> anyhow::Result<()> {
     match ipc::send_request(&Request::Snapshot).await? {
-        Response::Snapshot(snapshot) => app.apply_snapshot(snapshot),
+        Response::Snapshot(snapshot) => app.apply_snapshot(snapshot).await,
         Response::Error(message) => Err(anyhow!(message)),
         _ => Err(anyhow!("unexpected daemon snapshot response")),
     }

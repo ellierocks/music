@@ -8,7 +8,7 @@ target/
 .vscode/
 agents/
 .agents/
-.AGENTS.md
+AGENTS.md
 .codex
 .codex/
 .claude/

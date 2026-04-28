@@ -159,21 +159,17 @@ fn draw_now_playing(
     progress: f64,
     theme: &Theme,
 ) {
-    let playback_energy = if playback.playing && !playback.paused {
-        ((app.pulse * 2.4).sin() + 1.0) * 0.5
-    } else {
-        0.28
-    };
     let hero_block = Block::default()
-        .title_top(draw_now_playing_title(app))
+        .title(Line::from(vec![Span::styled(
+            " Now Playing ",
+            Style::default()
+                .fg(app.glow_color(0.72))
+                .add_modifier(Modifier::BOLD),
+        )]))
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.glow_color(0.62 + playback_energy as f32 * 0.28)))
-        .border_type(if playback.playing && !playback.paused {
-            BorderType::Double
-        } else {
-            BorderType::Rounded
-        })
+        .border_style(Style::default().fg(app.glow_color(0.35)))
+        .border_type(BorderType::Rounded)
         .style(theme.panel());
     let hero_inner = hero_block.inner(area);
     frame.render_widget(hero_block, area);
@@ -394,6 +390,7 @@ fn draw_sleeve(frame: &mut Frame<'_>, area: Rect, app: &RemoteApp) {
         .cover_dimensions()
         .map(|(w, h)| format!("{w}x{h} px"))
         .unwrap_or_else(|| "generated cover".to_string());
+    let sample_rate = format_sample_rate(app.current_track().sample_rate);
     let info_block = Block::default()
         .title(Line::from(vec![Span::styled(
             " Sleeve ",
@@ -445,11 +442,24 @@ fn draw_sleeve(frame: &mut Frame<'_>, area: Rect, app: &RemoteApp) {
                 Span::raw("  "),
                 Span::styled(format_duration(total_duration), Style::default().fg(theme.success)),
             ]),
+            Line::from(vec![
+                Span::styled("rate", Style::default().fg(theme.muted).add_modifier(Modifier::BOLD)),
+                Span::raw("  "),
+                Span::styled(sample_rate, Style::default().fg(app.glow_color(0.74))),
+            ]),
         ]))
         .wrap(Wrap { trim: true })
         .style(theme.panel()),
         info_inner,
     );
+}
+
+fn format_sample_rate(sample_rate: u32) -> String {
+    if sample_rate >= 1000 {
+        format!("{:.1} kHz", sample_rate as f32 / 1000.0)
+    } else {
+        format!("{sample_rate} Hz")
+    }
 }
 
 
@@ -523,33 +533,6 @@ fn display_track_title(title: &str) -> String {
     }
 }
 
-fn draw_now_playing_title(app: &RemoteApp) -> Line<'static> {
-    let music_notes = ["♪", "♫", "♬", "♩"];
-    let note = music_notes[((app.pulse * 2.0) as usize) % music_notes.len()];
-
-    let eq_frames = ["▁▃▅", "▃▅▇", "▅▇▆", "▇▆▄", "▆▄▂", "▄▂▁"];
-    let eq = eq_frames[((app.pulse * 3.0) as usize) % eq_frames.len()];
-    let halo = if ((app.pulse * 2.8).sin() + 1.0) * 0.5 > 0.55 {
-        "*"
-    } else {
-        "."
-    };
-
-    Line::from(vec![
-        Span::raw(" "),
-        Span::styled(halo, Style::default().fg(app.glow_color(0.45))),
-        Span::raw(" "),
-        Span::styled(note, Style::default().fg(app.accent_glow())),
-        Span::raw(" "),
-        Span::styled("Now Playing", animated_title_style(app)),
-        Span::raw(" "),
-        Span::styled(eq, Style::default().fg(app.accent_glow())),
-        Span::raw(" "),
-        Span::styled(halo, Style::default().fg(app.glow_color(0.45))),
-        Span::raw(" "),
-    ])
-}
-
 fn paused_or_stopped_badge(playback: PlaybackSnapshot, theme: &Theme) -> Span<'static> {
     if !playback.playing {
         return Span::styled(
@@ -566,19 +549,4 @@ fn paused_or_stopped_badge(playback: PlaybackSnapshot, theme: &Theme) -> Span<'s
     }
 
     Span::raw("")
-}
-
-fn animated_title_style(app: &RemoteApp) -> Style {
-    let flash = ((app.pulse * 2.5).sin() + 1.0) * 0.5;
-    let color = if flash > 0.55 {
-        app.accent_glow()
-    } else {
-        app.theme.text
-    };
-
-    Style::default().fg(color).add_modifier(if flash > 0.72 {
-        Modifier::BOLD
-    } else {
-        Modifier::empty()
-    })
 }

@@ -3,21 +3,35 @@ use std::{
     io::BufReader,
     path::{Path, PathBuf},
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use anyhow::{Context, anyhow};
+#[cfg(test)]
+use audioadapter_buffers::direct::InterleavedSlice;
 use rodio::{
     Decoder, OutputStream, OutputStreamHandle, Sink, Source,
-    cpal::traits::{DeviceTrait, HostTrait},
+    cpal::{
+        SampleFormat, SampleRate, SupportedStreamConfig, SupportedStreamConfigRange,
+        traits::{DeviceTrait, HostTrait},
+    },
 };
+#[cfg(test)]
+use rubato::{Fft, FixedSync, Resampler};
 use walkdir::WalkDir;
+
+#[cfg(test)]
+const RESAMPLER_CHUNK_SIZE: usize = 4096;
+#[cfg(test)]
+const RESAMPLER_SUB_CHUNKS: usize = 1;
 
 #[derive(Clone, Debug)]
 pub struct Track {
     pub path: PathBuf,
     pub title: String,
     pub duration: Duration,
+    pub sample_rate: u32,
+    pub channels: u16,
 }
 
 #[derive(Clone, Debug)]
@@ -33,9 +47,8 @@ pub struct AudioEngine {
     _stream: OutputStream,
     handle: OutputStreamHandle,
     sink: Sink,
-    started_at: Option<Instant>,
-    paused_at: Option<Instant>,
-    paused_position: Duration,
+    position_offset: Duration,
+    active: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -51,58 +64,59 @@ impl AudioEngine {
         let device = host
             .default_output_device()
             .ok_or_else(|| anyhow!("failed to find default audio output device"))?;
-        let default_config = device
-            .default_output_config()
-            .context("failed to query default output stream config")?;
-        let (_stream, handle) = OutputStream::try_from_device_config(&device, default_config)
-            .context("failed to open audio output stream at default sample rate")?;
+        let output_config =
+            select_output_config(&device).context("failed to choose audio output stream config")?;
+        let (_stream, handle) = OutputStream::try_from_device_config(&device, output_config)
+            .context("failed to open audio output stream")?;
         let sink = Sink::try_new(&handle).context("failed to create audio sink")?;
 
         Ok(Self {
             _stream,
             handle,
             sink,
-            started_at: None,
-            paused_at: None,
-            paused_position: Duration::ZERO,
+            position_offset: Duration::ZERO,
+            active: false,
         })
     }
 
     pub fn play_track(&mut self, track: &Track) -> anyhow::Result<()> {
         self.sink.stop();
         self.sink = Sink::try_new(&self.handle).context("failed to reset sink")?;
+        self.position_offset = Duration::ZERO;
+        self.append_track(track)?;
+        self.sink.play();
+        self.active = true;
+        Ok(())
+    }
 
+    pub fn queue_track(&mut self, track: &Track) -> anyhow::Result<()> {
+        self.append_track(track)
+    }
+
+    fn append_track(&mut self, track: &Track) -> anyhow::Result<()> {
         let file = File::open(&track.path)
             .with_context(|| format!("failed to open track {}", track.path.display()))?;
         let source = Decoder::new(BufReader::new(file))
-            .with_context(|| format!("failed to decode {}", track.path.display()))?;
+            .with_context(|| format!("failed to decode {}", track.path.display()))?
+            .convert_samples::<f32>();
+        let source = prepare_playback_source(source)?;
 
         self.sink.append(source);
-        self.sink.play();
-        self.started_at = Some(Instant::now());
-        self.paused_at = None;
-        self.paused_position = Duration::ZERO;
         Ok(())
     }
 
     pub fn toggle_pause(&mut self) {
         if self.sink.is_paused() {
             self.sink.play();
-            if let Some(paused_at) = self.paused_at.take() {
-                self.started_at = self.started_at.map(|started| started + paused_at.elapsed());
-            }
         } else {
             self.sink.pause();
-            self.paused_at = Some(Instant::now());
-            self.paused_position = self.position();
         }
     }
 
     pub fn stop(&mut self) {
         self.sink.stop();
-        self.started_at = None;
-        self.paused_at = None;
-        self.paused_position = Duration::ZERO;
+        self.position_offset = Duration::ZERO;
+        self.active = false;
     }
 
     pub fn seek_to(&mut self, target: Duration, track: &Track) -> anyhow::Result<()> {
@@ -111,49 +125,176 @@ impl AudioEngine {
             .with_context(|| format!("failed to open track {}", track.path.display()))?;
         let source = Decoder::new(BufReader::new(file))
             .with_context(|| format!("failed to decode {}", track.path.display()))?
-            .skip_duration(target);
+            .skip_duration(target)
+            .convert_samples::<f32>();
+        let source = prepare_playback_source(source)?;
         self.sink.stop();
         self.sink = Sink::try_new(&self.handle).context("failed to recreate sink")?;
+        self.position_offset = target;
         self.sink.append(source);
-        self.started_at = Some(Instant::now() - target);
-        self.paused_position = if was_paused { target } else { Duration::ZERO };
         if was_paused {
             self.sink.pause();
-            self.paused_at = Some(Instant::now());
         } else {
             self.sink.play();
-            self.paused_at = None;
         }
+        self.active = true;
         Ok(())
     }
 
-    pub fn position(&self) -> Duration {
-        if self.sink.empty() {
+    pub fn skip_one(&mut self) {
+        self.sink.skip_one();
+        self.position_offset = Duration::ZERO;
+    }
+
+    pub fn reset_position_offset(&mut self) {
+        self.position_offset = Duration::ZERO;
+    }
+
+    pub fn queued_source_count(&self) -> usize {
+        self.sink.len()
+    }
+
+    fn position(&self) -> Duration {
+        if !self.active || self.sink.empty() {
             return Duration::ZERO;
         }
 
-        if self.sink.is_paused() {
-            return self.paused_position;
-        }
-
-        self.started_at
-            .map(|started| started.elapsed())
-            .unwrap_or(Duration::ZERO)
+        self.position_offset + self.sink.get_pos()
     }
 
     pub fn snapshot(&self) -> PlaybackSnapshot {
         PlaybackSnapshot {
-            playing: !self.sink.empty(),
+            playing: self.active && !self.sink.empty(),
             paused: self.sink.is_paused(),
             position: self.position(),
         }
     }
 
     pub fn finished(&self, current_duration: Duration) -> bool {
-        self.started_at.is_some()
+        self.active
             && !self.sink.is_paused()
             && (self.sink.empty() || self.position() >= current_duration)
     }
+}
+
+fn select_output_config(device: &rodio::cpal::Device) -> anyhow::Result<SupportedStreamConfig> {
+    let default_config = device
+        .default_output_config()
+        .context("failed to query default output stream config")?;
+
+    let supported_configs = match device.supported_output_configs() {
+        Ok(configs) => configs.collect::<Vec<_>>(),
+        Err(_) => return Ok(default_config),
+    };
+
+    let default_channels = default_config.channels();
+    let preferred = supported_configs
+        .iter()
+        .filter(|config| config.channels() == default_channels)
+        .max_by(|left, right| compare_config_priority(left, right, default_config.sample_format()))
+        .or_else(|| {
+            supported_configs.iter().max_by(|left, right| {
+                compare_config_priority(left, right, default_config.sample_format())
+            })
+        })
+        .cloned();
+
+    Ok(preferred
+        .map(select_preferred_sample_rate)
+        .unwrap_or(default_config))
+}
+
+fn compare_config_priority(
+    left: &SupportedStreamConfigRange,
+    right: &SupportedStreamConfigRange,
+    default_sample_format: SampleFormat,
+) -> std::cmp::Ordering {
+    left.max_sample_rate()
+        .cmp(&right.max_sample_rate())
+        .then_with(|| {
+            sample_format_priority(left.sample_format(), default_sample_format).cmp(
+                &sample_format_priority(right.sample_format(), default_sample_format),
+            )
+        })
+}
+
+fn sample_format_priority(sample_format: SampleFormat, default_sample_format: SampleFormat) -> u8 {
+    match sample_format {
+        format if format == default_sample_format => 3,
+        SampleFormat::F32 => 2,
+        SampleFormat::F64
+        | SampleFormat::I64
+        | SampleFormat::U64
+        | SampleFormat::I32
+        | SampleFormat::U32 => 1,
+        _ => 0,
+    }
+}
+
+fn select_preferred_sample_rate(config: SupportedStreamConfigRange) -> SupportedStreamConfig {
+    for preferred_rate in [192_000_u32, 176_400, 96_000, 88_200] {
+        if let Some(config) = config.try_with_sample_rate(SampleRate(preferred_rate)) {
+            return config;
+        }
+    }
+
+    config.with_max_sample_rate()
+}
+
+fn prepare_playback_source<S>(source: S) -> anyhow::Result<Box<dyn Source<Item = f32> + Send>>
+where
+    S: Source<Item = f32> + Send + 'static,
+{
+    Ok(Box::new(source))
+}
+
+#[cfg(test)]
+fn resample_interleaved_samples(
+    mut samples: Vec<f32>,
+    channels: u16,
+    input_sample_rate: u32,
+    output_sample_rate: u32,
+) -> anyhow::Result<Vec<f32>> {
+    if input_sample_rate == output_sample_rate {
+        return Ok(samples);
+    }
+
+    let channel_count = channels as usize;
+    if channel_count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let frames = samples.len() / channel_count;
+    samples.truncate(frames * channel_count);
+    if frames == 0 {
+        return Ok(Vec::new());
+    }
+
+    let samples64: Vec<f64> = samples.into_iter().map(f64::from).collect();
+
+    let input = InterleavedSlice::new(&samples64, channel_count, frames)
+        .context("failed to prepare resampler input buffer")?;
+    let mut resampler = Fft::<f64>::new(
+        input_sample_rate as usize,
+        output_sample_rate as usize,
+        RESAMPLER_CHUNK_SIZE,
+        RESAMPLER_SUB_CHUNKS,
+        channel_count,
+        FixedSync::Both,
+    )
+    .context("failed to create rubato resampler")?;
+
+    let output_frames_capacity = resampler.process_all_needed_output_len(frames);
+    let mut output = vec![0.0f64; output_frames_capacity * channel_count];
+    let mut output_buffer =
+        InterleavedSlice::new_mut(&mut output, channel_count, output_frames_capacity)
+            .context("failed to prepare resampler output buffer")?;
+    let (_, output_frames) = resampler
+        .process_all_into_buffer(&input, &mut output_buffer, frames, None)
+        .context("failed to resample audio")?;
+    output.truncate(output_frames * channel_count);
+
+    Ok(output.into_iter().map(|sample| sample as f32).collect())
 }
 
 pub fn load_album(root: &Path) -> anyhow::Result<Album> {
@@ -226,11 +367,13 @@ fn probe_tracks(paths: Vec<PathBuf>) -> anyhow::Result<Vec<Track>> {
         return paths
             .into_iter()
             .map(|path| {
-                let duration = probe_duration(&path)?;
+                let metadata = probe_track_metadata(&path)?;
                 Ok(Track {
                     title: track_title(&path),
                     path,
-                    duration,
+                    duration: metadata.duration,
+                    sample_rate: metadata.sample_rate,
+                    channels: metadata.channels,
                 })
             })
             .collect();
@@ -245,11 +388,13 @@ fn probe_tracks(paths: Vec<PathBuf>) -> anyhow::Result<Vec<Track>> {
             chunk
                 .into_iter()
                 .map(|path| {
-                    let duration = probe_duration(&path)?;
+                    let metadata = probe_track_metadata(&path)?;
                     Ok(Track {
                         title: track_title(&path),
                         path,
-                        duration,
+                        duration: metadata.duration,
+                        sample_rate: metadata.sample_rate,
+                        channels: metadata.channels,
                     })
                 })
                 .collect()
@@ -267,14 +412,28 @@ fn probe_tracks(paths: Vec<PathBuf>) -> anyhow::Result<Vec<Track>> {
     Ok(tracks)
 }
 
-fn probe_duration(path: &Path) -> anyhow::Result<Duration> {
+struct TrackMetadata {
+    duration: Duration,
+    sample_rate: u32,
+    channels: u16,
+}
+
+fn probe_track_metadata(path: &Path) -> anyhow::Result<TrackMetadata> {
     let file = File::open(path)
         .with_context(|| format!("failed to open audio file {}", path.display()))?;
     let decoder = Decoder::new(BufReader::new(file))
         .with_context(|| format!("failed to decode {}", path.display()))?;
-    decoder
+    let sample_rate = decoder.sample_rate();
+    let channels = decoder.channels();
+    let duration = decoder
         .total_duration()
-        .ok_or_else(|| anyhow!("failed to determine duration for {}", path.display()))
+        .ok_or_else(|| anyhow!("failed to determine duration for {}", path.display()))?;
+
+    Ok(TrackMetadata {
+        duration,
+        sample_rate,
+        channels,
+    })
 }
 
 fn track_title(path: &Path) -> String {
@@ -306,4 +465,62 @@ fn is_cover(path: &Path) -> bool {
             stem.as_deref(),
             Some("cover" | "folder" | "front" | "album")
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resample_interleaved_samples;
+
+    #[test]
+    fn resamples_44k1_stereo_to_192k() {
+        assert_resample_shape(44_100, 192_000, 2, 44_100);
+    }
+
+    #[test]
+    fn resamples_48k_stereo_to_192k() {
+        assert_resample_shape(48_000, 192_000, 2, 48_000);
+    }
+
+    #[test]
+    fn keeps_samples_when_rates_match() {
+        let samples = vec![0.25, -0.25, 0.5, -0.5];
+        let output = resample_interleaved_samples(samples.clone(), 2, 48_000, 48_000).unwrap();
+        assert_eq!(output, samples);
+    }
+
+    fn assert_resample_shape(
+        input_sample_rate: u32,
+        output_sample_rate: u32,
+        channels: u16,
+        input_frames: usize,
+    ) {
+        let samples = sine_wave(input_sample_rate, input_frames, channels);
+        let output =
+            resample_interleaved_samples(samples, channels, input_sample_rate, output_sample_rate)
+                .unwrap();
+
+        let output_frames = output.len() / channels as usize;
+        let expected_frames = ((input_frames as u128 * output_sample_rate as u128)
+            / input_sample_rate as u128) as usize;
+        let tolerance = 8;
+
+        assert!(!output.is_empty());
+        assert!(output.iter().all(|sample| sample.is_finite()));
+        assert!(output_frames.abs_diff(expected_frames) <= tolerance);
+    }
+
+    fn sine_wave(sample_rate: u32, frames: usize, channels: u16) -> Vec<f32> {
+        let channel_count = channels as usize;
+        let mut output = Vec::with_capacity(frames * channel_count);
+
+        for frame in 0..frames {
+            let sample =
+                ((frame as f32 * 440.0 * std::f32::consts::TAU) / sample_rate as f32).sin() * 0.25;
+            for _ in 0..channel_count {
+                output.push(sample);
+            }
+        }
+
+        output
+    }
 }

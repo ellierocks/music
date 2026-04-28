@@ -67,7 +67,8 @@ async fn handle_connection(app: &mut App, stream: &mut UnixStream) -> anyhow::Re
         .read_to_end(&mut payload)
         .await
         .context("failed to read daemon request")?;
-    let request: Request = serde_json::from_slice(&payload).context("failed to parse daemon request")?;
+    let request: Request =
+        serde_json::from_slice(&payload).context("failed to parse daemon request")?;
 
     let response = match request {
         Request::Ping => Response::Pong,
@@ -116,12 +117,18 @@ async fn handle_tray_command(
     Ok(false)
 }
 
-async fn apply_remote_action(app: &mut App, action: crate::ipc::RemoteAction) -> anyhow::Result<()> {
+async fn apply_remote_action(
+    app: &mut App,
+    action: crate::ipc::RemoteAction,
+) -> anyhow::Result<()> {
     match action {
         crate::ipc::RemoteAction::TogglePause => app.handle_action(Action::TogglePause)?,
         crate::ipc::RemoteAction::NextTrack => app.handle_action(Action::NextTrack)?,
         crate::ipc::RemoteAction::PreviousTrack => app.handle_action(Action::PreviousTrack)?,
         crate::ipc::RemoteAction::Stop => app.handle_action(Action::Stop)?,
+        crate::ipc::RemoteAction::SeekToMillis(millis) => {
+            app.handle_action(Action::SeekTo(Duration::from_millis(millis)))?
+        }
         crate::ipc::RemoteAction::SeekByMillis(millis) => {
             app.handle_action(Action::SeekBy(Duration::from_millis(millis)))?
         }

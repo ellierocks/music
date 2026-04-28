@@ -67,11 +67,8 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn launch_daemon(current_exe: &PathBuf, album_dir: &PathBuf) -> anyhow::Result<()> {
-    let daemon_args = vec![
-        current_exe.display().to_string(),
-        "--daemon".to_string(),
-        album_dir.display().to_string(),
-    ];
+    let mut daemon_args = vec![current_exe.display().to_string(), "--daemon".to_string()];
+    daemon_args.push(album_dir.display().to_string());
 
     let mut command = if command_exists("setsid") {
         let mut cmd = Command::new("setsid");
@@ -79,7 +76,8 @@ fn launch_daemon(current_exe: &PathBuf, album_dir: &PathBuf) -> anyhow::Result<(
         cmd
     } else {
         let mut cmd = Command::new(current_exe);
-        cmd.arg("--daemon").arg(album_dir);
+        cmd.arg("--daemon");
+        cmd.arg(album_dir);
         cmd
     };
 

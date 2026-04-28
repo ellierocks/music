@@ -1,4 +1,8 @@
-use std::{env, path::PathBuf, time::{Duration, Instant}};
+use std::{
+    env,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use anyhow::Context;
 use catppuccin::PALETTE;
@@ -8,7 +12,9 @@ use ratatui::style::{Color, Style};
 use tokio::task;
 
 use crate::audio::{Album, AudioEngine, PlaybackSnapshot, load_album};
-use crate::ipc::{self, AlbumSnapshot, AppSnapshot, PlaybackSnapshot as RemotePlaybackSnapshot, TrackSnapshot};
+use crate::ipc::{
+    self, AlbumSnapshot, AppSnapshot, PlaybackSnapshot as RemotePlaybackSnapshot, TrackSnapshot,
+};
 
 #[derive(Clone, Debug)]
 pub enum Action {
@@ -16,6 +22,7 @@ pub enum Action {
     NextTrack,
     PreviousTrack,
     Stop,
+    SeekTo(Duration),
     SeekBy(Duration),
     SeekBackBy(Duration),
 }
@@ -48,8 +55,11 @@ pub struct App {
     pub visualizer: Vec<u64>,
     pub accent_phase: f32,
     cover_dimensions: Option<(u32, u32)>,
+    queued_track: Option<usize>,
     rng: SmallRng,
 }
+
+const GAPLESS_PRELOAD_WINDOW: Duration = Duration::from_secs(45);
 
 impl App {
     pub async fn new(album_dir: PathBuf) -> anyhow::Result<Self> {
@@ -68,6 +78,7 @@ impl App {
             visualizer: vec![3; 96],
             accent_phase: 0.0,
             cover_dimensions,
+            queued_track: None,
             rng: SmallRng::from_entropy(),
         })
     }
@@ -77,8 +88,11 @@ impl App {
         self.accent_phase = (self.pulse * 0.7).sin();
         self.tick_visualizer();
 
+        self.sync_gapless_transition();
+        let _ = self.queue_next_for_gapless();
+
         let current_duration = self.current_track().duration;
-        if self.engine.finished(current_duration) {
+        if self.queued_track.is_none() && self.engine.finished(current_duration) {
             let _ = self.advance_track(true);
         }
     }
@@ -88,7 +102,11 @@ impl App {
             Action::TogglePause => self.engine.toggle_pause(),
             Action::NextTrack => self.advance_track(false)?,
             Action::PreviousTrack => self.rewind_or_previous()?,
-            Action::Stop => self.engine.stop(),
+            Action::Stop => {
+                self.queued_track = None;
+                self.engine.stop();
+            }
+            Action::SeekTo(target) => self.seek_to(target)?,
             Action::SeekBy(delta) => self.seek_by(delta)?,
             Action::SeekBackBy(delta) => self.seek_back_by(delta)?,
         }
@@ -120,7 +138,11 @@ impl App {
                 title: self.album.title.clone(),
                 artist: self.album.artist.clone(),
                 path: self.album.path.display().to_string(),
-                cover_path: self.album.cover_path.as_ref().map(|path| path.display().to_string()),
+                cover_path: self
+                    .album
+                    .cover_path
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
                 tracks: self
                     .album
                     .tracks
@@ -128,6 +150,8 @@ impl App {
                     .map(|track| TrackSnapshot {
                         title: track.title.clone(),
                         duration_millis: ipc::duration_to_millis(track.duration),
+                        sample_rate: track.sample_rate,
+                        channels: track.channels,
                     })
                     .collect(),
             },
@@ -185,8 +209,7 @@ impl App {
                     + jitter)
                     .min(12.0)
             } else {
-                0.45
-                    + ((low_phase * 0.6).sin() + 1.0) * 0.5
+                0.45 + ((low_phase * 0.6).sin() + 1.0) * 0.5
                     + ((mid_phase * 0.45).cos() + 1.0) * 0.35
                     + jitter * 0.05
             };
@@ -205,9 +228,16 @@ impl App {
             self.current_track += 1;
         } else {
             self.engine.stop();
+            self.queued_track = None;
             if automatic {
                 self.current_track = self.album.tracks.len() - 1;
             }
+            return Ok(());
+        }
+
+        if automatic && self.queued_track == Some(self.current_track) {
+            self.engine.skip_one();
+            self.queued_track = None;
             return Ok(());
         }
 
@@ -228,6 +258,7 @@ impl App {
 
     fn play_current(&mut self) -> anyhow::Result<()> {
         let track = self.current_track().clone();
+        self.queued_track = None;
         self.engine.play_track(&track)
     }
 
@@ -249,7 +280,49 @@ impl App {
 
     fn seek_to(&mut self, target: Duration) -> anyhow::Result<()> {
         let track = self.current_track().clone();
+        let target = target.min(track.duration);
+        self.queued_track = None;
         self.engine.seek_to(target, &track)
+    }
+
+    fn sync_gapless_transition(&mut self) {
+        if let Some(queued_track) = self.queued_track {
+            if self.engine.queued_source_count() <= 1 && !self.engine.snapshot().playing {
+                self.queued_track = None;
+                return;
+            }
+
+            if self.engine.queued_source_count() <= 1 {
+                self.current_track = queued_track;
+                self.queued_track = None;
+                self.engine.reset_position_offset();
+            }
+        }
+    }
+
+    fn queue_next_for_gapless(&mut self) -> anyhow::Result<()> {
+        if self.queued_track.is_some() || self.current_track + 1 >= self.album.tracks.len() {
+            return Ok(());
+        }
+
+        let playback = self.playback();
+        if !playback.playing {
+            return Ok(());
+        }
+
+        let remaining = self
+            .current_track()
+            .duration
+            .saturating_sub(playback.position);
+        if remaining > GAPLESS_PRELOAD_WINDOW {
+            return Ok(());
+        }
+
+        let next_track = self.current_track + 1;
+        let track = self.album.tracks[next_track].clone();
+        self.engine.queue_track(&track)?;
+        self.queued_track = Some(next_track);
+        Ok(())
     }
 }
 

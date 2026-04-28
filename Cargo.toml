@@ -12,6 +12,7 @@ homepage = "https://github.com/ellierocks/music"
 
 [dependencies]
 anyhow = "1.0"
+audioadapter-buffers = "3.0.0"
 base64 = "0.22"
 catppuccin = "2.7"
 crossterm = { version = "0.28", features = ["event-stream"] }
@@ -21,6 +22,7 @@ ksni = "0.3"
 rand = { version = "0.8", features = ["small_rng"] }
 ratatui = "0.29"
 rodio = "0.20"
+rubato = "2.0.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "net", "io-util", "sync"] }

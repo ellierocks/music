@@ -17,6 +17,8 @@ use tokio::{
 pub struct TrackSnapshot {
     pub title: String,
     pub duration_millis: u64,
+    pub sample_rate: u32,
+    pub channels: u16,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -52,6 +54,7 @@ pub enum RemoteAction {
     NextTrack,
     PreviousTrack,
     Stop,
+    SeekToMillis(u64),
     SeekByMillis(u64),
     SeekBackByMillis(u64),
 }
@@ -107,7 +110,11 @@ pub fn acquire_client_lock() -> anyhow::Result<Option<ClientLock>> {
     }
 
     for _ in 0..2 {
-        match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
             Ok(mut file) => {
                 let pid = process::id();
                 writeln!(file, "{pid}")

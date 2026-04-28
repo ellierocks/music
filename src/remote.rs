@@ -89,22 +89,13 @@ impl RemoteApp {
                 if let Some(progress_rect) = self.progress_rect {
                     let point = Rect::new(mouse.column, mouse.row, 1, 1);
                     if progress_rect.intersects(point) && progress_rect.width > 0 {
-                        let playback_position = self.playback.position();
                         let relative = mouse.column.saturating_sub(progress_rect.x) as f32
-                            / progress_rect.width.max(1) as f32;
+                            / progress_rect.width.saturating_sub(1).max(1) as f32;
                         let target = self
                             .current_track()
                             .duration()
                             .mul_f32(relative.clamp(0.0, 1.0));
-                        return Some(if target > playback_position {
-                            RemoteAction::SeekByMillis(ipc::duration_to_millis(
-                                target - playback_position,
-                            ))
-                        } else {
-                            RemoteAction::SeekBackByMillis(ipc::duration_to_millis(
-                                playback_position - target,
-                            ))
-                        });
+                        return Some(RemoteAction::SeekToMillis(ipc::duration_to_millis(target)));
                     }
                 }
                 None
@@ -160,7 +151,11 @@ impl RemoteApp {
     }
 
     pub fn glow_color(&self, intensity: f32) -> Color {
-        blend(self.theme.border, self.accent_glow(), intensity.clamp(0.0, 1.0))
+        blend(
+            self.theme.border,
+            self.accent_glow(),
+            intensity.clamp(0.0, 1.0),
+        )
     }
 
     pub fn cover_dimensions(&self) -> Option<(u32, u32)> {
@@ -256,8 +251,8 @@ async fn load_cover(
             .is_some_and(|ext| ext.eq_ignore_ascii_case("png"));
 
         let (cover_art, cover_png_data) = if is_png {
-            let png_data = fs::read(&path_buf)
-                .with_context(|| format!("failed to read cover art {path}"))?;
+            let png_data =
+                fs::read(&path_buf).with_context(|| format!("failed to read cover art {path}"))?;
             let image = image::load_from_memory_with_format(&png_data, ImageFormat::Png)
                 .with_context(|| format!("failed to decode cover art {path}"))?;
             (Some(image), Some(png_data))

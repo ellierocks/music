@@ -1,4 +1,5 @@
 use std::{
+    env,
     fs,
     io::Cursor,
     path::{Path, PathBuf},
@@ -26,6 +27,20 @@ struct CoverCache {
     lines: Vec<Line<'static>>,
 }
 
+#[derive(Clone, Copy)]
+pub enum MotionLevel {
+    Off,
+    Low,
+    Full,
+}
+
+#[derive(Clone, Copy)]
+struct CoverPalette {
+    low: Color,
+    mid: Color,
+    high: Color,
+}
+
 pub struct RemoteApp {
     pub album: AlbumSnapshot,
     pub current_track: usize,
@@ -36,16 +51,19 @@ pub struct RemoteApp {
     pub visualizer: Vec<u64>,
     pub theme: Theme,
     pub accent_phase: f32,
+    pub motion: MotionLevel,
     playback: PlaybackSnapshot,
     cover_art: Option<DynamicImage>,
     cover_png_data: Option<Vec<u8>>,
     cover_cache: Option<CoverCache>,
+    cover_palette: Option<CoverPalette>,
 }
 
 impl RemoteApp {
     pub async fn new(snapshot: AppSnapshot, minimal: bool) -> anyhow::Result<Self> {
         let theme = Theme::from_env();
         let (cover_art, cover_png_data) = load_cover(snapshot.album.cover_path.as_deref()).await?;
+        let cover_palette = extract_cover_palette(cover_art.as_ref(), &theme);
 
         Ok(Self {
             album: snapshot.album,
@@ -57,10 +75,12 @@ impl RemoteApp {
             visualizer: snapshot.visualizer,
             theme,
             accent_phase: snapshot.accent_phase,
+            motion: MotionLevel::from_env(),
             playback: snapshot.playback,
             cover_art,
             cover_png_data,
             cover_cache: None,
+            cover_palette,
         })
     }
 
@@ -78,6 +98,7 @@ impl RemoteApp {
             self.cover_art = cover_art;
             self.cover_png_data = cover_png_data;
             self.cover_cache = None;
+            self.cover_palette = extract_cover_palette(self.cover_art.as_ref(), &self.theme);
         }
 
         Ok(())
@@ -150,6 +171,30 @@ impl RemoteApp {
         )
     }
 
+    pub fn motion_pulse(&self) -> f32 {
+        match self.motion {
+            MotionLevel::Off => 0.0,
+            MotionLevel::Low => self.pulse * 0.35,
+            MotionLevel::Full => self.pulse,
+        }
+    }
+
+    pub fn spectrum_color(&self, t: f32, shimmer: f32) -> Color {
+        let t = (t + shimmer * 0.03).clamp(0.0, 1.0);
+        let (low, mid, high) = self
+            .cover_palette
+            .map(|palette| (palette.low, palette.mid, palette.high))
+            .unwrap_or((self.theme.accent_cool, self.theme.accent_alt, self.theme.accent_warm));
+
+        let color = if t < 0.5 {
+            blend(low, mid, t * 2.0)
+        } else {
+            blend(mid, high, (t - 0.5) * 2.0)
+        };
+
+        blend(self.theme.border, color, (0.42 + shimmer * 0.58).clamp(0.0, 1.0))
+    }
+
     pub fn glow_color(&self, intensity: f32) -> Color {
         blend(
             self.theme.border,
@@ -220,6 +265,21 @@ impl RemoteApp {
             result.push(average.round() as u64);
         }
         result
+    }
+}
+
+impl MotionLevel {
+    fn from_env() -> Self {
+        match env::var("MUSIC_MOTION")
+            .ok()
+            .as_deref()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("off") | Some("0") | Some("false") => Self::Off,
+            Some("low") => Self::Low,
+            _ => Self::Full,
+        }
     }
 }
 
@@ -363,6 +423,69 @@ fn encode_cover_png(image: &DynamicImage) -> anyhow::Result<Vec<u8>> {
         .write_to(&mut buffer, ImageFormat::Png)
         .context("failed to encode cover art as PNG")?;
     Ok(buffer.into_inner())
+}
+
+fn extract_cover_palette(image: Option<&DynamicImage>, theme: &Theme) -> Option<CoverPalette> {
+    if !env_flag("MUSIC_COVER_COLORS", true) {
+        return None;
+    }
+
+    let image = image?;
+    let rgb = image.thumbnail(32, 32).to_rgb8();
+    let mut warm = (0_u64, 0_u64, 0_u64, 0_u64);
+    let mut cool = (0_u64, 0_u64, 0_u64, 0_u64);
+    let mut bright = (0_u64, 0_u64, 0_u64, 0_u64);
+
+    for pixel in rgb.pixels() {
+        let [r, g, b] = pixel.0;
+        let brightness = r as u16 + g as u16 + b as u16;
+        if r >= b {
+            add_rgb(&mut warm, r, g, b);
+        } else {
+            add_rgb(&mut cool, r, g, b);
+        }
+        if brightness > 220 {
+            add_rgb(&mut bright, r, g, b);
+        }
+    }
+
+    let low = average_rgb(cool).unwrap_or(theme.accent_cool);
+    let mid = average_rgb(bright).unwrap_or(theme.highlight);
+    let high = average_rgb(warm).unwrap_or(theme.accent_warm);
+    Some(CoverPalette {
+        low: blend(theme.accent_cool, low, 0.32),
+        mid: blend(theme.accent_alt, mid, 0.28),
+        high: blend(theme.accent_warm, high, 0.32),
+    })
+}
+
+fn add_rgb(bucket: &mut (u64, u64, u64, u64), r: u8, g: u8, b: u8) {
+    bucket.0 += r as u64;
+    bucket.1 += g as u64;
+    bucket.2 += b as u64;
+    bucket.3 += 1;
+}
+
+fn average_rgb(bucket: (u64, u64, u64, u64)) -> Option<Color> {
+    let count = bucket.3;
+    if count == 0 {
+        return None;
+    }
+    Some(Color::Rgb(
+        (bucket.0 / count) as u8,
+        (bucket.1 / count) as u8,
+        (bucket.2 / count) as u8,
+    ))
+}
+
+fn env_flag(key: &str, default: bool) -> bool {
+    env::var(key)
+        .map(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            _ => default,
+        })
+        .unwrap_or(default)
 }
 
 fn blank_line(width: usize) -> Line<'static> {

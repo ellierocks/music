@@ -31,11 +31,16 @@ pub enum Action {
 pub struct Theme {
     pub accent: Color,
     pub accent_alt: Color,
+    pub accent_warm: Color,
+    pub accent_cool: Color,
+    pub highlight: Color,
     pub success: Color,
+    pub warning: Color,
     pub border: Color,
     pub text: Color,
     pub muted: Color,
     pub surface: Color,
+    pub dim_surface: Color,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -349,15 +354,35 @@ impl Theme {
     pub fn from_env() -> Self {
         let flavor = ThemeFlavor::from_env();
         let palette = flavor.palette();
+        let mut accent = catppuccin_color(palette.colors.blue);
+        let mut accent_alt = catppuccin_color(palette.colors.mauve);
+        let mut success = catppuccin_color(palette.colors.green);
+        let mut border = catppuccin_color(palette.colors.surface1);
+        let mut text = catppuccin_color(palette.colors.text);
+        let mut muted = catppuccin_color(palette.colors.subtext0);
+        let mut surface = catppuccin_color(palette.colors.base);
+
+        accent = env_color("MUSIC_ACCENT").unwrap_or(accent);
+        accent_alt = env_color("MUSIC_ACCENT_ALT").unwrap_or(accent_alt);
+        success = env_color("MUSIC_SUCCESS").unwrap_or(success);
+        border = env_color("MUSIC_BORDER").unwrap_or(border);
+        text = env_color("MUSIC_TEXT").unwrap_or(text);
+        muted = env_color("MUSIC_MUTED").unwrap_or(muted);
+        surface = env_color("MUSIC_SURFACE").unwrap_or(surface);
 
         Self {
-            accent: catppuccin_color(palette.colors.blue),
-            accent_alt: catppuccin_color(palette.colors.mauve),
-            success: catppuccin_color(palette.colors.green),
-            border: catppuccin_color(palette.colors.surface1),
-            text: catppuccin_color(palette.colors.text),
-            muted: catppuccin_color(palette.colors.subtext0),
-            surface: catppuccin_color(palette.colors.base),
+            accent,
+            accent_alt,
+            accent_warm: blend_color(accent_alt, catppuccin_color(palette.colors.peach), 0.55),
+            accent_cool: blend_color(accent, catppuccin_color(palette.colors.teal), 0.45),
+            highlight: blend_color(text, accent, 0.28),
+            success,
+            warning: catppuccin_color(palette.colors.yellow),
+            border,
+            text,
+            muted,
+            surface,
+            dim_surface: blend_color(surface, border, 0.45),
         }
     }
 
@@ -368,6 +393,74 @@ impl Theme {
 
 fn catppuccin_color(color: catppuccin::Color) -> Color {
     Color::Rgb(color.rgb.r, color.rgb.g, color.rgb.b)
+}
+
+fn env_color(key: &str) -> Option<Color> {
+    env::var(key).ok().and_then(|value| parse_color(value.trim()))
+}
+
+fn parse_color(value: &str) -> Option<Color> {
+    let value = value.trim();
+    let hex = value.strip_prefix('#').unwrap_or(value);
+    if hex.len() == 6 && hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+        return Some(Color::Rgb(r, g, b));
+    }
+
+    match value.to_ascii_lowercase().as_str() {
+        "black" => Some(Color::Black),
+        "red" => Some(Color::Red),
+        "green" => Some(Color::Green),
+        "yellow" => Some(Color::Yellow),
+        "blue" => Some(Color::Blue),
+        "magenta" | "purple" => Some(Color::Magenta),
+        "cyan" => Some(Color::Cyan),
+        "gray" | "grey" => Some(Color::Gray),
+        "darkgray" | "darkgrey" => Some(Color::DarkGray),
+        "lightred" => Some(Color::LightRed),
+        "lightgreen" => Some(Color::LightGreen),
+        "lightyellow" => Some(Color::LightYellow),
+        "lightblue" => Some(Color::LightBlue),
+        "lightmagenta" | "lightpurple" => Some(Color::LightMagenta),
+        "lightcyan" => Some(Color::LightCyan),
+        "white" => Some(Color::White),
+        _ => None,
+    }
+}
+
+fn blend_color(left: Color, right: Color, t: f32) -> Color {
+    match (rgb_components(left), rgb_components(right)) {
+        (Some((lr, lg, lb)), Some((rr, rg, rb))) => {
+            let mix = |a: u8, b: u8| -> u8 { (a as f32 + (b as f32 - a as f32) * t) as u8 };
+            Color::Rgb(mix(lr, rr), mix(lg, rg), mix(lb, rb))
+        }
+        _ => left,
+    }
+}
+
+fn rgb_components(color: Color) -> Option<(u8, u8, u8)> {
+    match color {
+        Color::Black => Some((0, 0, 0)),
+        Color::Red => Some((205, 49, 49)),
+        Color::Green => Some((13, 188, 121)),
+        Color::Yellow => Some((229, 229, 16)),
+        Color::Blue => Some((36, 114, 200)),
+        Color::Magenta => Some((188, 63, 188)),
+        Color::Cyan => Some((17, 168, 205)),
+        Color::Gray => Some((229, 229, 229)),
+        Color::DarkGray => Some((102, 102, 102)),
+        Color::LightRed => Some((241, 76, 76)),
+        Color::LightGreen => Some((35, 209, 139)),
+        Color::LightYellow => Some((245, 245, 67)),
+        Color::LightBlue => Some((59, 142, 234)),
+        Color::LightMagenta => Some((214, 112, 214)),
+        Color::LightCyan => Some((41, 184, 219)),
+        Color::White => Some((255, 255, 255)),
+        Color::Rgb(r, g, b) => Some((r, g, b)),
+        _ => None,
+    }
 }
 
 impl ThemeFlavor {

@@ -18,11 +18,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut RemoteApp, graphics_active: bool) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .areas(area);
-    let note = if ((app.pulse * 2.2).sin() + 1.0) * 0.5 > 0.55 {
+    let motion = app.motion_pulse();
+    let note = if ((motion * 2.2).sin() + 1.0) * 0.5 > 0.55 {
         "♪"
     } else {
         "♬"
     };
+    let header_shimmer = ((motion * 0.9).sin() + 1.0) * 0.5;
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -34,17 +36,19 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut RemoteApp, graphics_active: bool) {
                 " MUSIC ",
                 Style::default()
                     .fg(theme.surface)
-                    .bg(app.accent_glow())
+                    .bg(app.spectrum_color(header_shimmer, header_shimmer))
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 " • ",
-                Style::default().fg(app.glow_color(0.42)).bg(theme.surface),
+                Style::default()
+                    .fg(app.spectrum_color(0.72, header_shimmer))
+                    .bg(theme.surface),
             ),
             Span::styled(
                 " one album at a time ",
                 Style::default()
-                    .fg(theme.text)
+                    .fg(app.spectrum_color(0.36, 0.35 + header_shimmer * 0.25))
                     .bg(theme.surface)
                     .add_modifier(Modifier::BOLD),
             ),
@@ -168,7 +172,7 @@ fn draw_now_playing(
         )]))
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.glow_color(0.35)))
+        .border_style(Style::default().fg(app.spectrum_color(0.18, app.motion_pulse() * 0.08)))
         .border_type(BorderType::Rounded)
         .style(theme.panel());
     let hero_inner = hero_block.inner(area);
@@ -194,9 +198,9 @@ fn draw_now_playing(
             paused_or_stopped_badge(playback, theme),
         ]),
         Line::from(vec![
-            Span::styled(elapsed.clone(), Style::default().fg(theme.text)),
+            Span::styled(elapsed.clone(), Style::default().fg(app.spectrum_color(0.15, 0.65))),
             Span::styled(" / ", Style::default().fg(theme.muted)),
-            Span::styled(total.clone(), Style::default().fg(theme.text)),
+            Span::styled(total.clone(), Style::default().fg(app.spectrum_color(0.82, 0.48))),
         ]),
     ]);
     frame.render_widget(
@@ -244,12 +248,12 @@ fn draw_glow_box(frame: &mut Frame<'_>, area: Rect, app: &RemoteApp, theme: &The
         .title(Span::styled(
             " Glow ",
             Style::default()
-                .fg(app.glow_color(0.7))
+                .fg(app.spectrum_color(0.64, 0.7))
                 .add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(app.glow_color(0.35)))
+        .border_style(Style::default().fg(app.spectrum_color(0.52, 0.35)))
         .style(theme.panel());
     let vis_inner = vis_block.inner(area);
     frame.render_widget(vis_block, area);
@@ -283,14 +287,25 @@ fn render_glow_lines(
             let left = bar_mask(data.get(col * 2).copied().unwrap_or(0), row, total_dots, false);
             let right = bar_mask(data.get(col * 2 + 1).copied().unwrap_or(0), row, total_dots, true);
             let cell = char::from_u32(0x2800 + left + right).unwrap_or(' ');
-            let brightness = ((row + 1) as f32 / rows as f32).powf(1.35);
-            let sweep = (((app.pulse * 3.4) + col as f32 * 0.22 + row as f32 * 0.12).sin() + 1.0)
+            let vertical = if rows <= 1 {
+                0.5
+            } else {
+                row as f32 / (rows - 1) as f32
+            };
+            let brightness = 0.34 + vertical.powf(0.85) * 0.34;
+            let motion = app.motion_pulse();
+            let sweep = (((motion * 3.4) + col as f32 * 0.22 + row as f32 * 0.12).sin() + 1.0)
                 * 0.5;
-            let intensity = (0.16 + brightness * 0.62 + sweep * 0.22).clamp(0.0, 1.0);
+            let intensity = (brightness + sweep * 0.18).clamp(0.0, 0.82);
+            let gradient_pos = if cols <= 1 {
+                0.0
+            } else {
+                col as f32 / (cols - 1) as f32
+            };
             spans.push(Span::styled(
                 cell.to_string(),
                 Style::default()
-                    .fg(app.glow_color(intensity))
+                    .fg(app.spectrum_color(gradient_pos, intensity + motion * 0.04))
                     .bg(theme.surface),
             ));
         }
@@ -308,7 +323,8 @@ fn render_progress_bar(app: &RemoteApp, theme: &Theme, progress: f64, width: u16
     let filled = (progress.clamp(0.0, 1.0) * width as f64).round() as usize;
     let mut rail = Vec::with_capacity(width as usize);
     let mut glow = Vec::with_capacity(width as usize);
-    let pulse = ((app.pulse * 2.6).sin() + 1.0) * 0.5;
+    let motion = app.motion_pulse();
+    let pulse = ((motion * 2.6).sin() + 1.0) * 0.5;
 
     for index in 0..width as usize {
         let is_filled = index < filled;
@@ -318,7 +334,7 @@ fn render_progress_bar(app: &RemoteApp, theme: &Theme, progress: f64, width: u16
         } else {
             index as f32 / (width as f32 - 1.0)
         };
-        let shimmer = (((app.pulse * 3.3) + position * 5.7).sin() + 1.0) * 0.5;
+        let shimmer = (((motion * 3.3) + position * 5.7).sin() + 1.0) * 0.5;
 
         if is_filled {
             let fill_position = if filled <= 1 {
@@ -329,13 +345,13 @@ fn render_progress_bar(app: &RemoteApp, theme: &Theme, progress: f64, width: u16
             let taper = fill_position.powf(0.65);
             let intensity = (0.50 + taper * 0.28 + pulse as f32 * 0.12 + shimmer * 0.1)
                 .clamp(0.0, 1.0);
-            let color = app.glow_color(intensity);
+            let color = app.spectrum_color(position, intensity + shimmer * 0.2);
             rail.push(Span::styled(" ", Style::default().bg(color)));
 
             let glow_color = if index == head {
-                app.accent_glow()
+                app.spectrum_color(position, pulse as f32)
             } else {
-                app.glow_color((0.36 + shimmer * 0.22).clamp(0.0, 1.0))
+                app.spectrum_color(position, (0.36 + shimmer * 0.22).clamp(0.0, 1.0))
             };
             glow.push(Span::styled(
                 if index == head { "◆" } else { "─" },
@@ -348,7 +364,7 @@ fn render_progress_bar(app: &RemoteApp, theme: &Theme, progress: f64, width: u16
                     }),
             ));
         } else {
-            rail.push(Span::styled(" ", Style::default().bg(theme.border)));
+            rail.push(Span::styled(" ", Style::default().bg(theme.dim_surface)));
             glow.push(Span::styled(
                 if pulse > 0.66 && position > progress as f32 {
                     "·"
@@ -385,7 +401,10 @@ fn draw_sleeve(frame: &mut Frame<'_>, area: Rect, app: &RemoteApp) {
         .tracks
         .iter()
         .fold(std::time::Duration::ZERO, |sum, track| sum + track.duration());
-    let detail_border = app.glow_color(0.34 + (((app.pulse * 1.8).sin() + 1.0) * 0.5) as f32 * 0.14);
+    let detail_border = app.spectrum_color(
+        0.72,
+        0.34 + (((app.motion_pulse() * 1.8).sin() + 1.0) * 0.5) as f32 * 0.14,
+    );
     let dims = app
         .cover_dimensions()
         .map(|(w, h)| format!("{w}x{h} px"))
@@ -408,7 +427,7 @@ fn draw_sleeve(frame: &mut Frame<'_>, area: Rect, app: &RemoteApp) {
     frame.render_widget(
         Paragraph::new(Text::from(vec![
             Line::from(vec![
-                Span::styled("● ", Style::default().fg(app.glow_color(0.8))),
+                Span::styled("● ", Style::default().fg(app.spectrum_color(0.92, 0.8))),
                 Span::styled(
                     app.album.title.clone(),
                     Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
@@ -427,7 +446,7 @@ fn draw_sleeve(frame: &mut Frame<'_>, area: Rect, app: &RemoteApp) {
             Line::from(vec![
                 Span::styled("art", Style::default().fg(theme.muted).add_modifier(Modifier::BOLD)),
                 Span::raw("  "),
-                Span::styled(dims, Style::default().fg(app.glow_color(0.74))),
+                Span::styled(dims, Style::default().fg(app.spectrum_color(0.18, 0.74))),
             ]),
             Line::from(vec![
                 Span::styled("tracks", Style::default().fg(theme.muted).add_modifier(Modifier::BOLD)),
@@ -445,7 +464,7 @@ fn draw_sleeve(frame: &mut Frame<'_>, area: Rect, app: &RemoteApp) {
             Line::from(vec![
                 Span::styled("rate", Style::default().fg(theme.muted).add_modifier(Modifier::BOLD)),
                 Span::raw("  "),
-                Span::styled(sample_rate, Style::default().fg(app.glow_color(0.74))),
+                Span::styled(sample_rate, Style::default().fg(app.spectrum_color(0.42, 0.74))),
             ]),
         ]))
         .wrap(Wrap { trim: true })
@@ -467,15 +486,20 @@ fn draw_tracks(frame: &mut Frame<'_>, area: Rect, app: &RemoteApp) {
     let theme = app.theme.clone();
     let block = Block::default()
         .title(Line::from(vec![
-            Span::raw(" Album Queue "),
+            Span::styled(
+                " Album Queue ",
+                Style::default()
+                    .fg(app.spectrum_color(0.04, 0.58))
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(
                 format!(" {} tracks ", app.album.tracks.len()),
-                Style::default().fg(theme.muted),
+                Style::default().fg(app.spectrum_color(0.28, 0.42)),
             ),
         ]))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme.border))
+        .border_style(Style::default().fg(app.spectrum_color(0.12, 0.28)))
         .style(theme.panel());
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -488,14 +512,25 @@ fn draw_tracks(frame: &mut Frame<'_>, area: Rect, app: &RemoteApp) {
         .map(|(index, track)| {
             let active = index == app.current_track;
             let title_style = if active {
-                Style::default().fg(app.accent_glow()).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(app.accent_glow())
+                    .bg(theme.dim_surface)
+                    .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(theme.text)
+                Style::default().fg(app.spectrum_color(index as f32 * 0.071, 0.58))
             };
             let duration_style = if active {
-                Style::default().fg(app.accent_glow()).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(app.accent_glow())
+                    .bg(theme.dim_surface)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(theme.muted)
+            };
+            let gap_style = if active {
+                Style::default().bg(theme.dim_surface)
+            } else {
+                theme.panel()
             };
             let title = display_track_title(&track.title);
             let duration = format_duration(track.duration());
@@ -506,7 +541,7 @@ fn draw_tracks(frame: &mut Frame<'_>, area: Rect, app: &RemoteApp) {
 
             ListItem::new(Line::from(vec![
                 Span::styled(title, title_style),
-                Span::raw(" ".repeat(gap)),
+                Span::styled(" ".repeat(gap), gap_style),
                 Span::styled(duration, duration_style),
             ]))
         })
@@ -544,7 +579,7 @@ fn paused_or_stopped_badge(playback: PlaybackSnapshot, theme: &Theme) -> Span<'s
     if playback.paused {
         return Span::styled(
             "  •  PAUSED",
-            Style::default().fg(theme.success).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.warning).add_modifier(Modifier::BOLD),
         );
     }
 

@@ -103,6 +103,13 @@ The UI still accepts color overrides for advanced tuning:
 
 Values can be named colors like `cyan` or hex colors like `#5fd7ff`.
 
+Eye-candy behavior can be tuned without changing layout:
+
+- `MUSIC_MOTION=full` uses the default animated glow
+- `MUSIC_MOTION=low` slows decorative animation
+- `MUSIC_MOTION=off` freezes decorative animation
+- `MUSIC_COVER_COLORS=0` disables cover-derived accent colors
+
 Example:
 
 ```bash
